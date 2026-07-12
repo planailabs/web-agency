@@ -58,7 +58,7 @@ rustPlatform.buildRustPackage {
     runHook preBuild
 
     # Tailwind CSS
-    pushd web-agency/server
+    pushd server
     npm run tailwind:build
     popd
 
