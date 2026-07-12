@@ -47,6 +47,9 @@
             nodejs
             tailwindcss_3
 
+            # Ephemeral test databases (pgtemp spawns initdb/postgres)
+            postgresql
+
             # cargo-progenitor installed via: cargo install cargo-progenitor
             wrangler
 

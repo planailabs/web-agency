@@ -56,6 +56,8 @@ pub struct ContactSaveResponse {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DomainAvailability {
     pub domain: Option<String>,
+    // The spec calls this `result` (DomainAvailabilityStatus enum).
+    #[serde(rename = "result")]
     pub status: Option<String>,
     #[serde(rename = "premiumPricing", default)]
     pub premium_pricing: Vec<PremiumPrice>,
@@ -71,7 +73,8 @@ pub struct PremiumPrice {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DomainListResponse {
     pub items: Vec<DomainInfo>,
-    #[serde(rename = "totalCount")]
+    // The spec calls this `total`.
+    #[serde(rename = "total")]
     pub total_count: Option<u32>,
 }
 

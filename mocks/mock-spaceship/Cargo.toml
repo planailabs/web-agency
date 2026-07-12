@@ -1,0 +1,17 @@
+[package]
+name = "mock-spaceship"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+spaceship-api = { path = "../../spaceship-api" }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+rustls = { workspace = true }

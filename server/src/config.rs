@@ -32,6 +32,9 @@ pub struct ProxyConfig {
     #[serde(default = "default_agency_upstream")]
     pub agency_upstream: String,
     pub acme_email: Option<String>,
+    /// ACME directory URL override. Defaults to Let's Encrypt production;
+    /// tests point this at a pebble instance.
+    pub acme_directory_url: Option<String>,
     #[serde(default = "default_internal_token_path")]
     pub internal_token_path: String,
 }

@@ -3779,6 +3779,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-changedetection"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "changedetection-api",
+ "reqwest 0.13.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mock-cloudflare"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "cloudflare-api",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "mock-spaceship"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest 0.13.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "spaceship-api",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "moka"
 version = "0.12.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

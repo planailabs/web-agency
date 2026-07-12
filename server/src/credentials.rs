@@ -19,6 +19,11 @@ pub fn validate_outbound_url(url: &str) -> anyhow::Result<()> {
     if !matches!(parsed.scheme(), "http" | "https") {
         anyhow::bail!("url scheme must be http or https");
     }
+    // Test escape hatch: integration/NixOS tests point credentials at mock
+    // APIs on loopback. Never set in production.
+    if std::env::var("WEB_AGENCY_ALLOW_PRIVATE_APIS").as_deref() == Ok("1") {
+        return Ok(());
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("url has no host"))?;
@@ -80,6 +85,18 @@ pub async fn credential_json(
     Ok(serde_json::from_slice(&decrypted)?)
 }
 
+/// Optional per-credential API base URL override (`api_url` key). Used to
+/// point clients at mock APIs in tests; validated like every stored URL.
+fn credential_api_url(data: &serde_json::Value) -> anyhow::Result<Option<&str>> {
+    match data["api_url"].as_str() {
+        Some(url) if !url.is_empty() => {
+            validate_outbound_url(url)?;
+            Ok(Some(url))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Build a Cloudflare API client from a stored credential.
 pub async fn cf_client(
     pool: &PgPool,
@@ -89,7 +106,10 @@ pub async fn cf_client(
     let token = data["api_token"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing api_token"))?;
-    Ok(cloudflare_api::compat::SimpleClient::new(token))
+    Ok(match credential_api_url(&data)? {
+        Some(url) => cloudflare_api::compat::SimpleClient::with_base_url(url, token),
+        None => cloudflare_api::compat::SimpleClient::new(token),
+    })
 }
 
 /// Build a Cloudflare API client and resolve the account ID.
@@ -104,7 +124,10 @@ pub async fn cf_client_with_account(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing api_token"))?;
     let configured = data["account_id"].as_str().unwrap_or("");
-    let client = cloudflare_api::compat::SimpleClient::new(token);
+    let client = match credential_api_url(&data)? {
+        Some(url) => cloudflare_api::compat::SimpleClient::with_base_url(url, token),
+        None => cloudflare_api::compat::SimpleClient::new(token),
+    };
     let account_id = client.resolve_account_id(configured).await?;
 
     // Backfill account_id if it was empty
@@ -194,7 +217,10 @@ pub async fn spaceship_client(
     let secret = data["api_secret"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing api_secret"))?;
-    Ok(spaceship_api::compat::SimpleClient::new(key, secret))
+    Ok(match credential_api_url(&data)? {
+        Some(url) => spaceship_api::compat::SimpleClient::with_base_url(url, key, secret),
+        None => spaceship_api::compat::SimpleClient::new(key, secret),
+    })
 }
 
 #[cfg(test)]

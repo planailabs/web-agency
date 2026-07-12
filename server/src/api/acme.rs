@@ -107,13 +107,18 @@ async fn acme_account(pool: &PgPool, contact_email: &str) -> anyhow::Result<inst
         return Ok(Account::from_credentials(creds).await?);
     }
 
+    let directory_url = crate::config::config()
+        .proxy
+        .as_ref()
+        .and_then(|p| p.acme_directory_url.clone())
+        .unwrap_or_else(|| LetsEncrypt::Production.url().to_string());
     let (account, creds) = Account::create(
         &NewAccount {
             contact: &[&format!("mailto:{contact_email}")],
             terms_of_service_agreed: true,
             only_return_existing: false,
         },
-        LetsEncrypt::Production.url(),
+        &directory_url,
         None,
     )
     .await?;
