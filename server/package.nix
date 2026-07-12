@@ -17,7 +17,7 @@
 
 let
   # utoipa-swagger-ui's build.rs downloads Swagger UI with curl unless this
-  # env var points it at a local file (same fix as ../../server/package.nix).
+  # env var points it at a local file (same fix as mac-mgmt's server/package.nix).
   swagger-ui = fetchurl {
     url = "https://github.com/swagger-api/swagger-ui/archive/refs/tags/v5.17.14.zip";
     hash = "sha256-SBJE0IEgl7Efuu73n3HZQrFxYX+cn5UU5jrL4T5xzNw=";
@@ -27,9 +27,9 @@ in
 rustPlatform.buildRustPackage {
   pname = "web-agency-server";
   version = "0.1.0";
-  src = ../..;
-  cargoLock.lockFile = ../../Cargo.lock;
-  cargoLock.outputHashes = import ../../extra-hashes.nix;
+  src = ../.;
+  cargoLock.lockFile = ../Cargo.lock;
+  cargoLock.outputHashes = import ../extra-hashes.nix;
 
   cargoBuildFlags = [ "-p" "web-agency-server" ];
 
