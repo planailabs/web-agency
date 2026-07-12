@@ -26,3 +26,29 @@ jobs:
 
     - name: Run tests
       run: nix develop -c cargo test --workspace --locked
+
+  nixos-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Magic Nix Cache
+      uses: DeterminateSystems/magic-nix-cache-action@main
+
+    # ubuntu-latest runners expose /dev/kvm but it's root-only by default;
+    # without this the VM test falls back to painfully slow TCG emulation.
+    - name: Enable KVM
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: Full-workload NixOS VM test
+      run: nix build .#checks.x86_64-linux.full -L

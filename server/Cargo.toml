@@ -64,6 +64,13 @@ tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["fs", "timeout"], optional = true }
 prometheus = { version = "0.13", optional = true }
 
+[dev-dependencies]
+pgtemp = "0.7"
+axum = "0.8"
+mock-cloudflare = { path = "../mocks/mock-cloudflare" }
+mock-spaceship = { path = "../mocks/mock-spaceship" }
+mock-changedetection = { path = "../mocks/mock-changedetection" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 

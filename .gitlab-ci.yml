@@ -1,0 +1,32 @@
+stages:
+  - test
+  - check
+
+before_script:
+  # Same cargo-cache dance as mac-mgmt: initialize the mounted cache before
+  # symlinking so nested tools never see a broken ~/.cargo.
+  - mkdir -p /cache/cargo
+  - rm -rf ~/.cargo
+  - ln -s /cache/cargo ~/.cargo
+  - export CARGO_HOME="$HOME/.cargo"
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+
+test:
+  stage: test
+  tags:
+    - nix-image
+  script:
+    - nix develop -c cargo test --workspace --locked
+  timeout: 3h
+
+flake-check:
+  stage: check
+  tags:
+    - nix-image
+  script:
+    # VM-backed flake checks are resource-heavy; run them serially so one
+    # test VM cannot starve another until the NixOS backdoor times out.
+    - nix flake check -L --max-jobs 1
+  timeout: 3h

@@ -15,13 +15,18 @@ use uuid::Uuid;
 /// http://169.254.169.254/ or http://localhost:2375/). Call at credential
 /// creation and again before each outbound request.
 pub fn validate_outbound_url(url: &str) -> anyhow::Result<()> {
+    // Test escape hatch: integration/NixOS tests point credentials at mock
+    // APIs on loopback. Never set in production.
+    let allow_private = std::env::var("WEB_AGENCY_ALLOW_PRIVATE_APIS").as_deref() == Ok("1");
+    validate_outbound_url_impl(url, allow_private)
+}
+
+fn validate_outbound_url_impl(url: &str, allow_private: bool) -> anyhow::Result<()> {
     let parsed = reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid url: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         anyhow::bail!("url scheme must be http or https");
     }
-    // Test escape hatch: integration/NixOS tests point credentials at mock
-    // APIs on loopback. Never set in production.
-    if std::env::var("WEB_AGENCY_ALLOW_PRIVATE_APIS").as_deref() == Ok("1") {
+    if allow_private {
         return Ok(());
     }
     let host = parsed
@@ -223,9 +228,170 @@ pub async fn spaceship_client(
     })
 }
 
+#[cfg(all(test, feature = "server"))]
+mod pg_tests {
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    /// Process-global test setup: rustls provider, config file + env vars.
+    /// Everything env-related must happen here, before any config::load call.
+    fn init_env() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // Workspace feature unification builds reqwest with rustls-no-provider.
+            let _ = rustls::crypto::ring::default_provider().install_default();
+
+            let dir = std::env::temp_dir().join(format!("web-agency-test-{}", std::process::id()));
+            let hosting = dir.join("hosting");
+            std::fs::create_dir_all(&hosting).unwrap();
+
+            use rand::Rng;
+            let key_bytes: [u8; 32] = rand::rng().random();
+            let key =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key_bytes);
+
+            // The database URL is a placeholder: every test connects its own
+            // pool straight to its pgtemp cluster; config is only consulted
+            // for the encryption key.
+            let config = format!(
+                "[database]\nurl = \"postgres://placeholder/placeholder\"\n\n\
+                 [local_hosting]\ndir = \"{}\"\n\n\
+                 [secrets]\nencryption_key = \"{key}\"\n",
+                hosting.display()
+            );
+            let config_path = dir.join("config.toml");
+            std::fs::write(&config_path, config).unwrap();
+
+            unsafe {
+                std::env::set_var("CONFIG_PATH", &config_path);
+                std::env::set_var("WEB_AGENCY_ALLOW_PRIVATE_APIS", "1");
+            }
+            crate::config::load();
+        });
+    }
+
+    /// Boot a throwaway Postgres cluster and run the server migrations.
+    /// The returned `PgTempDB` must stay alive for the duration of the test.
+    async fn test_db() -> (pgtemp::PgTempDB, PgPool) {
+        init_env();
+        let db = pgtemp::PgTempDB::async_new().await;
+        let pool = PgPool::connect(&db.connection_uri()).await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        (db, pool)
+    }
+
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    async fn insert_credential(
+        pool: &PgPool,
+        name: &str,
+        cred_type: &str,
+        data: &serde_json::Value,
+    ) -> Uuid {
+        let encrypted = crate::crypto::encrypt(&serde_json::to_vec(data).unwrap()).unwrap();
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO credentials (name, credential_type, encrypted_data) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(name)
+        .bind(cred_type)
+        .bind(&encrypted)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cloudflare_resolves_and_backfills_account_id() {
+        let (_db, pool) = test_db().await;
+        let base = serve(mock_cloudflare::router()).await;
+        let cred_id = insert_credential(
+            &pool,
+            "cf",
+            "cloudflare",
+            &serde_json::json!({ "api_token": "test-token", "api_url": base }),
+        )
+        .await;
+
+        let (_client, account_id) = super::cf_client_with_account(&pool, cred_id).await.unwrap();
+        assert_eq!(account_id.len(), 32);
+        assert!(account_id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // The resolved account_id must have been backfilled into the row.
+        let data = super::credential_json(&pool, cred_id, "cloudflare")
+            .await
+            .unwrap();
+        assert_eq!(data["account_id"].as_str(), Some(account_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn spaceship_checks_availability() {
+        let (_db, pool) = test_db().await;
+        let base = serve(mock_spaceship::router()).await;
+        let cred_id = insert_credential(
+            &pool,
+            "space",
+            "spaceship",
+            &serde_json::json!({
+                "api_key": "test-key",
+                "api_secret": "test-secret",
+                "api_url": base,
+            }),
+        )
+        .await;
+
+        let client = super::spaceship_client(&pool, cred_id).await.unwrap();
+        let avail = client.check_availability("free.example").await.unwrap();
+        assert_eq!(avail.domain.as_deref(), Some("free.example"));
+        assert_eq!(avail.status.as_deref(), Some("available"));
+    }
+
+    #[tokio::test]
+    async fn changedetection_returns_client_and_group() {
+        let (_db, pool) = test_db().await;
+        let base = serve(mock_changedetection::router()).await;
+        let cred_id = insert_credential(
+            &pool,
+            "cd",
+            "changedetection",
+            &serde_json::json!({
+                "api_url": base,
+                "api_key": "test-key",
+                "group": "watch-group",
+            }),
+        )
+        .await;
+
+        let (client, group) = super::changedetection_client(&pool, cred_id).await.unwrap();
+        assert_eq!(group, "watch-group");
+        let info = client.get_system_info().await.unwrap().into_inner();
+        assert!(info.version.is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_credential_is_not_found() {
+        let (_db, pool) = test_db().await;
+        let missing = Uuid::new_v4();
+        let err = match super::cf_client(&pool, missing).await {
+            Ok(_) => panic!("expected missing credential to error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+}
+
 #[cfg(test)]
 mod ssrf_tests {
-    use super::validate_outbound_url;
+    // The pg_tests above set WEB_AGENCY_ALLOW_PRIVATE_APIS=1 process-wide, so
+    // exercise the check below the env escape hatch directly.
+    fn validate_outbound_url(url: &str) -> anyhow::Result<()> {
+        super::validate_outbound_url_impl(url, false)
+    }
 
     #[test]
     fn blocks_metadata_and_loopback_and_private() {

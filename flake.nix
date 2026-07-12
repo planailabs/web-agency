@@ -73,7 +73,17 @@
           default = pkgs.web-agency-server;
           web-agency = pkgs.web-agency-server;
           web-agency-proxy = pkgs.web-agency-proxy;
+          web-agency-mocks = pkgs.web-agency-mocks;
           dioxus-cli-patched = pkgs.dioxus-cli-patched;
+        };
+
+        # nixpkgs.lib (not pkgs.lib): evaluating pkgs for unsupported systems
+        # (x86_64-darwin) throws, and `nix flake show` walks every system.
+        checks = nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # Full-workload NixOS VM test: server + proxy + postgres + provider
+          # mocks + pebble ACME. Run with:
+          #   nix build .#checks.x86_64-linux.full -L
+          full = pkgs.callPackage ./tests/full.nix { };
         };
       });
 }

@@ -4392,6 +4392,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgtemp"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6d35886f9448b0a12b24c9fee002332d19b5c021af45745fa1731f140eaf14e"
+dependencies = [
+ "libc",
+ "tempfile",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7515,6 +7527,7 @@ dependencies = [
  "argon2",
  "async-stream",
  "async-trait",
+ "axum",
  "axum-extra",
  "axum-oidc-client",
  "base64",
@@ -7530,7 +7543,11 @@ dependencies = [
  "hex",
  "hmac",
  "instant-acme",
+ "mock-changedetection",
+ "mock-cloudflare",
+ "mock-spaceship",
  "percent-encoding",
+ "pgtemp",
  "plan-ai-actions",
  "plan-ai-api-mcp",
  "plan-ai-api-mcp-macros",

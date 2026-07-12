@@ -17,4 +17,5 @@ in
 
   web-agency-server = prev.callPackage ./server/package.nix { inherit gitSha; };
   web-agency-proxy = prev.callPackage ./proxy/package.nix { };
+  web-agency-mocks = prev.callPackage ./mocks/package.nix { };
 }
