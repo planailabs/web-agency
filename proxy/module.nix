@@ -16,6 +16,16 @@ in
 
     package = lib.mkPackageOption pkgs "web-agency-proxy" { };
 
+    internalTokenFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/web-agency-server/internal.token";
+      description = ''
+        Root-readable path to the server's internal API token. Exposed to
+        the proxy via systemd LoadCredential; the proxy reads it from its
+        credentials directory.
+      '';
+    };
+
     settings = lib.mkOption {
       type = settingsFormat.type;
       default = { };
@@ -30,7 +40,6 @@ in
             agency_upstream = "127.0.0.1:7380";
             http_addr = "[::]:80";
             https_addr = "[::]:443";
-            internal_token_path = "/var/lib/web-agency-server/internal.token";
             server_url = "http://127.0.0.1:7380";
           };
         }
@@ -63,11 +72,14 @@ in
         SupplementaryGroups = [ "web-agency" ];
 
         # The server's StateDirectory lives under /var/lib/private/<name>
-        # (DynamicUser bind-mount), which is mode 0700 root-owned and
-        # therefore invisible to other DynamicUser units. Bind-mount the
-        # symlinked path explicitly so the proxy can read the shared
-        # internal.token via its SupplementaryGroups membership.
-        BindReadOnlyPaths = [ "/var/lib/web-agency-server" ];
+        # (DynamicUser), whose 0700 root-owned parent blocks path traversal
+        # for every other unit — a bind mount doesn't help because the
+        # /var/lib/web-agency-server symlink still resolves through it. Let
+        # systemd read the token as root instead and surface it in this
+        # unit's credentials directory. Until the server has written the
+        # token, LoadCredential fails the start and Restart/RestartSec
+        # retry until it appears.
+        LoadCredential = [ "internal.token:${cfg.internalTokenFile}" ];
 
         # Needs to bind to ports 80/443
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
@@ -95,7 +107,7 @@ in
 
     # Fallback defaults when the proxy is used standalone (without the server module).
     services.web-agency-proxy.settings.proxy = {
-      internal_token_path = lib.mkDefault "/var/lib/web-agency-server/internal.token";
+      internal_token_path = lib.mkDefault "/run/credentials/web-agency-proxy.service/internal.token";
       server_url = lib.mkDefault "http://127.0.0.1:7380";
       agency_upstream = lib.mkDefault "127.0.0.1:7380";
     };
