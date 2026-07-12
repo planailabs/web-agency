@@ -1,9 +1,9 @@
 [workspace]
 members = ["common", "common/plan-ai-actions", "common/plan-ai-api-mcp", "common/plan-ai-api-mcp-macros", "common/plan-ai-auth", "common/plan-ai-html", "changedetection-api", "cloudflare-api", "dataforseo-api", "proxy", "server", "spaceship-api", "upload-cli"]
-# plan-ai-design is consumed by path (memvault/plan-ai-design submodule),
-# mirroring the mac-mgmt umbrella layout so common/plan-ai-actions' relative
-# path dep resolves identically in both checkouts.
-exclude = ["memvault"]
+# plan-ai-design is consumed by path (design/ submodule); mac-mgmt mirrors
+# this with a design -> memvault/plan-ai-design symlink so
+# common/plan-ai-actions' relative path dep resolves in both checkouts.
+exclude = ["design"]
 resolver = "3"
 
 [workspace.dependencies]

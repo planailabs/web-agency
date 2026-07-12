@@ -11,7 +11,7 @@ server = ["webui", "dioxus/server", "dep:axum-oidc-client", "dep:axum-extra", "d
 
 [dependencies]
 dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
-plan-ai-design = { path = "../memvault/plan-ai-design", optional = true }
+plan-ai-design = { path = "../design", optional = true }
 plan-ai-html = { path = "../common/plan-ai-html", optional = true }
 time = { version = "0.3", optional = true }
 wasm-bindgen = { version = "=0.2.121", optional = true }

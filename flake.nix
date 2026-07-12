@@ -1,6 +1,6 @@
 {
   inputs = {
-    # Include git submodules (common, memvault/plan-ai-design) in the flake source.
+    # Include git submodules (common, design) in the flake source.
     self.submodules = true;
 
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
