@@ -3,6 +3,7 @@
 let
   dioxusHash = "sha256-asz/Sm7BHGBNYvPXZS/rx+tlZrTbrmNNCoHal16LKzk=";
   dioxusI18nHash = "sha256-Y05EJtoJMw07aonrkIXp1gcDZKrhm30Aok7mClxAL78=";
+  swiftideHash = "sha256-zN6IQ+4YzXYTLCKOqSJBnj/V0aIr7031HO+xDBQlgck=";
 in {
   "const-serialize-0.8.0-alpha.0" = dioxusHash;
   "const-serialize-macro-0.8.0-alpha.0" = dioxusHash;
@@ -44,4 +45,5 @@ in {
   "subsecond-0.8.0-alpha.0" = dioxusHash;
   "subsecond-types-0.8.0-alpha.0" = dioxusHash;
   "dioxus-i18n-0.5.1" = dioxusI18nHash;
+  "swiftide-0.32.1" = swiftideHash;
 }
