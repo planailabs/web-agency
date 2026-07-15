@@ -64,6 +64,11 @@ pub struct ChatConfig {
     pub anthropic_api_key: Option<String>,
     #[serde(default)]
     pub openrouter_api_key: Option<String>,
+    /// Named OpenAI-compatible sources (`[[chat.openai]]`): api.openai.com,
+    /// vLLM, LM Studio, ... Each name doubles as the provider string in
+    /// [[models]] entries (must not be "ollama"/"anthropic"/"openrouter").
+    #[serde(default)]
+    pub openai: Vec<plan_ai_chat::connector::OpenAiSource>,
     /// Validator LLM for the guard layer (shown alongside approval prompts).
     #[serde(default)]
     pub validator_provider: Option<String>,

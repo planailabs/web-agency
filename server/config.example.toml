@@ -57,10 +57,25 @@ encryption_key = "CHANGE_ME_base64_encoded_32_byte_key"
 # validator_model = "gemma4"
 # tools_include = []                             # tool-name globs to offer (empty = all, e.g. ["domain_*"])
 # tools_exclude = []                             # tool-name globs to hide (e.g. ["*_delete"])
+#
+# Named OpenAI-compatible sources: api.openai.com, vLLM, LM Studio, ...
+# Each name doubles as the provider string in [[models]] entries and must
+# not be "ollama"/"anthropic"/"openrouter" or contain ':'. Add as many as
+# needed.
+# [[chat.openai]]
+# name = "openai"                                # generic OpenAI
+# url = "https://api.openai.com/v1"
+# api_key = "sk-xxx"
+# model = "gpt-4.1"                              # default when a request names none
+# [[chat.openai]]
+# name = "vllm"
+# url = "http://my-vllm:8000/v1"                 # api_key optional for local servers
+# model = "meta-llama/Llama-3.3-70B-Instruct"
 
 # Unified model list for the chat model picker. If omitted, a small built-in
 # Anthropic default list is used. Each entry: name (display label), model
-# (provider identifier), provider ("ollama", "anthropic", "openrouter"),
+# (provider identifier), provider ("ollama", "anthropic", "openrouter", or a
+# [[chat.openai]] source name),
 # optional token_budget override, optional input_cost_per_mtok /
 # output_cost_per_mtok (USD per 1M tokens), and:
 #   validator = true        # also offered as validator/guard model

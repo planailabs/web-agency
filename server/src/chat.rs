@@ -39,6 +39,7 @@ pub async fn init(pool: sqlx::PgPool, cfg: &crate::config::ServerConfig) -> Resu
         ollama_url: chat_cfg.ollama_url.clone(),
         anthropic_api_key: chat_cfg.anthropic_api_key.clone(),
         openrouter_api_key: chat_cfg.openrouter_api_key.clone(),
+        openai_sources: chat_cfg.openai.clone(),
         token_budget: chat_cfg.token_budget,
         ..ConnectorConfig::default()
     };
