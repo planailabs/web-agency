@@ -57,6 +57,11 @@ async fn init_server() -> sqlx::PgPool {
         .run(&pool)
         .await
         .expect("failed to run migrations");
+    // Actions-crate migrations own action_template_runs; run after ours
+    // (which dropped the host-owned copy of the table).
+    plan_ai_actions::migrations::run_migrations(&pool)
+        .await
+        .expect("failed to run actions migrations");
 
     // Ensure the internal API token file exists (for proxy ↔ server auth).
     if let Some(proxy_cfg) = &cfg.proxy {
