@@ -189,6 +189,12 @@ pub fn Layout() -> Element {
                     }
                 }
             }
+
+            // Context-aware agency chat: floating bubble + slide-in sidebar,
+            // available on every page (renders nothing when chat is disabled).
+            plan_ai_chat_ui::sidebar::ChatSidebar {
+                page_context: use_route::<Route>().to_string(),
+            }
         }
     }
 }

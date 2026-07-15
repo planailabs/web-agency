@@ -1,5 +1,5 @@
 [workspace]
-members = ["common", "common/plan-ai-actions", "common/plan-ai-api-mcp", "common/plan-ai-api-mcp-macros", "common/plan-ai-auth", "common/plan-ai-html", "changedetection-api", "cloudflare-api", "dataforseo-api", "mocks/mock-changedetection", "mocks/mock-cloudflare", "mocks/mock-spaceship", "proxy", "server", "spaceship-api", "upload-cli"]
+members = ["common", "common/plan-ai-actions", "common/plan-ai-api-mcp", "common/plan-ai-api-mcp-macros", "common/plan-ai-auth", "common/plan-ai-chat", "common/plan-ai-chat-ui", "common/plan-ai-html", "changedetection-api", "cloudflare-api", "dataforseo-api", "mocks/mock-changedetection", "mocks/mock-cloudflare", "mocks/mock-spaceship", "proxy", "server", "spaceship-api", "upload-cli"]
 # plan-ai-design is consumed by path (design/ submodule). mac-mgmt excludes
 # common/plan-ai-actions from its workspace, so the design/ path only needs
 # to resolve here.
@@ -15,3 +15,11 @@ rmcp = { version = "0.17", default-features = false, features = ["server", "tran
 dioxus = { git = "https://github.com/mkg20001/dioxus.git", branch = "feat/embed" }
 dioxus-server = { git = "https://github.com/mkg20001/dioxus.git", branch = "feat/embed" }
 dioxus-i18n = { git = "https://github.com/mkg20001/dioxus-i18n.git", branch = "feat/dioxus-0.8" }
+# Required by common/plan-ai-chat (see its Cargo.toml NOTE).
+swiftide = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-agents = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-core = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-integrations = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-indexing = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-macros = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }
+swiftide-query = { git = "https://github.com/mkg20001/swiftide.git", branch = "mac-mgmt-patches" }

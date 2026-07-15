@@ -14,6 +14,99 @@ pub struct ServerConfig {
     pub auth: Option<AuthConfig>,
     pub secrets: Option<SecretsConfig>,
     pub proxy: Option<ProxyConfig>,
+    /// Interactive agency chatbot (agent over the api-mcp tool surface).
+    #[serde(default)]
+    pub chat: Option<ChatConfig>,
+    /// Unified model list (`[[models]]`). Entries may set `validator = true`,
+    /// `validator_only = true` and `restrict = "chat" | [types]`.
+    #[serde(default)]
+    pub models: Vec<LlmModelEntry>,
+}
+
+pub use plan_ai_chat::models::{LlmModelEntry, ModelCatalog};
+
+impl ServerConfig {
+    /// The unified model catalog; falls back to a small built-in list so an
+    /// enabled chat works without explicit model config.
+    pub fn model_catalog(&self) -> ModelCatalog {
+        if !self.models.is_empty() {
+            return ModelCatalog::new(self.models.clone());
+        }
+        ModelCatalog::new(vec![
+            LlmModelEntry::with_budget(
+                "Claude Sonnet 4.6",
+                "claude-sonnet-4-6",
+                "anthropic",
+                200_000,
+            ),
+            LlmModelEntry::with_budget(
+                "Claude Haiku 4.5",
+                "claude-haiku-4-5-20251001",
+                "anthropic",
+                400_000,
+            ),
+        ])
+    }
+}
+
+/// `[chat]` — interactive agency chatbot. The agent's tools are the api-mcp
+/// registry endpoints, dispatched with the chat user's principal; calls at or
+/// above `risk_threshold` pause for human approval in the chat UI.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatConfig {
+    /// Master switch. Default off.
+    #[serde(default)]
+    pub enabled: bool,
+    /// LLM providers.
+    #[serde(default)]
+    pub ollama_url: Option<String>,
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub openrouter_api_key: Option<String>,
+    /// Validator LLM for the guard layer (shown alongside approval prompts).
+    #[serde(default)]
+    pub validator_provider: Option<String>,
+    #[serde(default)]
+    pub validator_model: Option<String>,
+    /// Per-session token budget. 0 = unlimited. Default 500k.
+    #[serde(default = "default_chat_token_budget")]
+    pub token_budget: u64,
+    /// Minimum tool risk that requires human approval:
+    /// "mutating" (default), "destructive", or "never" (disable the gate).
+    #[serde(default = "default_chat_risk_threshold")]
+    pub risk_threshold: String,
+    /// Offer/accept "approve all for this session". Default true.
+    #[serde(default = "default_true")]
+    pub allow_approve_all: bool,
+    /// Max concurrently running agent sessions per user. Default 3.
+    #[serde(default = "default_chat_max_sessions")]
+    pub max_active_sessions_per_user: u32,
+    /// Minutes an interactive session idles before parking. Default 30.
+    #[serde(default = "default_chat_idle_park_minutes")]
+    pub idle_park_minutes: u64,
+    /// Tool-name globs to include (empty = all registry tools).
+    #[serde(default)]
+    pub tools_include: Vec<String>,
+    /// Tool-name globs to exclude.
+    #[serde(default)]
+    pub tools_exclude: Vec<String>,
+}
+
+fn default_chat_token_budget() -> u64 {
+    500_000
+}
+fn default_chat_risk_threshold() -> String {
+    "mutating".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_chat_max_sessions() -> u32 {
+    3
+}
+fn default_chat_idle_park_minutes() -> u64 {
+    30
 }
 
 #[derive(Debug, Deserialize)]

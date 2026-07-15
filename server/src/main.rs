@@ -4,6 +4,10 @@ mod api;
 // `#[server]` wrappers the UI calls; the registry/auth inside are server-gated.
 #[cfg(feature = "webui")]
 mod api_mcp;
+#[cfg(all(feature = "server", feature = "webui"))]
+mod chat;
+#[cfg(all(feature = "server", feature = "webui"))]
+mod chat_sse;
 #[cfg(feature = "server")]
 mod config;
 #[cfg(feature = "server")]
@@ -45,6 +49,10 @@ async fn init_server() -> sqlx::PgPool {
     let cfg = config::load();
     let pool = db::connect(&cfg.database.url).await;
 
+    // Chat-crate migrations own the chat_* tables; run before ours.
+    plan_ai_chat::store::migrations::run_migrations(&pool)
+        .await
+        .expect("failed to run chat migrations");
     sqlx::migrate!()
         .run(&pool)
         .await
@@ -289,8 +297,20 @@ fn main() {
             // routers do their own Bearer-token check and must NOT be
             // wrapped, otherwise unauthenticated requests get redirected to
             // /auth/login before their handler-level auth runs.
-            let mut web_router =
-                axum::Router::new().serve_dioxus_application(ServeConfig::new(), web::app::App);
+            let mut web_router = axum::Router::new()
+                .serve_dioxus_application(ServeConfig::new(), web::app::App)
+                // Chat sidebar session stream (auth-gated with the web UI).
+                .route(
+                    plan_ai_chat_ui::sidebar::SSE_PATH,
+                    axum::routing::get(crate::chat_sse::view_session_sse),
+                );
+
+            // Interactive agency chatbot (no-op when [chat] is disabled).
+            if let Ok(pool) = crate::server_pool() {
+                if let Err(e) = crate::chat::init(pool, config::load()).await {
+                    tracing::error!("failed to initialize chat: {e:#}");
+                }
+            }
 
             if let Some(auth_layers) = auth_layers {
                 web_router = web_router
