@@ -3,7 +3,7 @@ const tokenColor = (v) => `rgb(var(--${v}) / <alpha-value>)`;
 
 module.exports = {
   darkMode: 'selector',
-  content: ["./src/**/*.rs", "../design/src/**/*.rs", "../common/plan-ai-actions/src/**/*.rs"],
+  content: ["./src/**/*.rs", "../design/src/**/*.rs", "../common/plan-ai-actions/src/**/*.rs", "../common/plan-ai-chat-ui/src/**/*.rs"],
   safelist: ['td', 'th'],
   theme: {
     extend: {
