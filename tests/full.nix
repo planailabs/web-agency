@@ -9,9 +9,9 @@
 # WEB_AGENCY_ALLOW_PRIVATE_APIS=1 lets those loopback URLs through the SSRF
 # guard (test-only escape hatch).
 #
-# ACME: the server's instant-acme client verifies TLS with the *system* trust
-# store (hyper-rustls `with_native_roots`), so installing the pebble test CA
-# via security.pki.certificateFiles is enough — no server code changes.
+# ACME: the server's instant-acme client verifies TLS with rustls native roots.
+# Point SSL_CERT_FILE directly at the pebble test CA so the test does not
+# depend on the distro trust-store file layout inside the VM.
 # PEBBLE_VA_ALWAYS_VALID=1 skips DNS-01 validation (the TXT record only lands
 # in the mock Cloudflare API, which pebble cannot resolve).
 #
@@ -128,7 +128,10 @@ pkgs.testers.nixosTest {
 
     # SSRF escape hatch: credentials in this test point api_url at loopback
     # mocks, which validate_outbound_url would otherwise reject.
-    systemd.services.web-agency-server.environment.WEB_AGENCY_ALLOW_PRIVATE_APIS = "1";
+    systemd.services.web-agency-server.environment = {
+      WEB_AGENCY_ALLOW_PRIVATE_APIS = "1";
+      SSL_CERT_FILE = "${pebbleTlsDir}/ca-cert.pem";
+    };
 
     services.web-agency-proxy = {
       enable = true;
@@ -338,6 +341,19 @@ pkgs.testers.nixosTest {
         ), f"sub-URL missing: {suburls}"
         machine.log("changedetection credential binding + sub-URL flow verified")
 
+        # The ACME path contacts the local proxy for HTTP/DNS challenge plumbing;
+        # prove the proxy is ready before certificate issuance so startup
+        # failures are reported at the right boundary.
+        machine.wait_for_unit("web-agency-proxy.service")
+        machine.wait_for_open_port(${toString proxyHttpPort})
+
+        # Served by the proxy itself on any host — proves Pingora is up.
+        well_known = json.loads(machine.succeed(
+            "curl -sf http://127.0.0.1:${toString proxyHttpPort}/.well-known/web-agency.json"
+        ))
+        assert well_known["service"] == "web-agency-proxy", f"unexpected: {well_known}"
+        machine.log("proxy is up")
+
         # ── ACME: issue a real certificate via pebble ─────────────────
         # The domain has a mock CF zone, so the DNS-01 TXT record is written
         # to the mock; pebble validates instantly (PEBBLE_VA_ALWAYS_VALID).
@@ -351,15 +367,7 @@ pkgs.testers.nixosTest {
         assert cert["issuer"] == "letsencrypt", f"unexpected issuer: {cert}"
         machine.log("ACME certificate issued through pebble")
 
-        # ── Proxy ─────────────────────────────────────────────────────
-        machine.wait_for_unit("web-agency-proxy.service")
-        machine.wait_for_open_port(${toString proxyHttpPort})
-
-        # Served by the proxy itself on any host — proves Pingora is up.
-        well_known = json.loads(machine.succeed(
-            "curl -sf http://127.0.0.1:${toString proxyHttpPort}/.well-known/web-agency.json"
-        ))
-        assert well_known["service"] == "web-agency-proxy", f"unexpected: {well_known}"
+        # ── Proxy routing ─────────────────────────────────────────────
 
         # The agency route is synced from the server's internal API; once it
         # lands, requests for the agency domain reach the server upstream.

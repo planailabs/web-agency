@@ -143,6 +143,11 @@ in
       lib.mkDefault (cfg.settings.proxy.internal_token_path or "/var/lib/web-agency-server/internal.token")
     );
 
+    systemd.services.web-agency-proxy = lib.mkIf (cfg.settings ? proxy) {
+      after = [ "web-agency-server.service" ];
+      requires = [ "web-agency-server.service" ];
+    };
+
     services.postgresql = {
       enable = true;
 
