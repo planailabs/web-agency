@@ -125,6 +125,16 @@ struct RelayInfo {
     /// Pass the visitor's Host header through instead of rewriting it to the
     /// relay URL's hostname (tunnel folders only).
     passthrough_host: bool,
+    /// Ready-to-send Authorization header value ("Basic ...") for the tunnel
+    /// upstream (tunnel folders with a basic_auth credential).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    basic_authorization: Option<String>,
+    /// PEM client certificate chain + key presented to the tunnel upstream
+    /// during the TLS handshake (tunnel folders with a client_cert credential).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_cert_pem: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_key_pem: Option<String>,
 }
 
 #[derive(Serialize, serde::Deserialize, Clone)]
@@ -392,6 +402,9 @@ async fn get_routes(
                 url: relay_url,
                 proxy_token,
                 passthrough_host: false,
+                basic_authorization: None,
+                client_cert_pem: None,
+                client_key_pem: None,
             }),
             auth,
         });
@@ -409,9 +422,12 @@ async fn get_routes(
             String,
             Option<uuid::Uuid>,
             bool,
+            Option<uuid::Uuid>,
+            Option<uuid::Uuid>,
         ),
     >(
-        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.organization_id, w.auth_mode, w.auth_basic_list_id, w.tunnel_passthrough_host \
+        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.organization_id, w.auth_mode, w.auth_basic_list_id, \
+         w.tunnel_passthrough_host, w.tunnel_client_cert_credential_id, w.tunnel_basic_auth_credential_id \
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id AND h.kind = 'proxy' \
          JOIN webspaces w ON w.webspace_host_id = h.id \
@@ -432,6 +448,8 @@ async fn get_routes(
         auth_mode,
         basic_list_id,
         passthrough_host,
+        client_cert_cred_id,
+        basic_auth_cred_id,
     ) in tunnel_rows
     {
         let host = match subdomain.as_deref() {
@@ -447,6 +465,37 @@ async fn get_routes(
         })?;
 
         let auth = build_auth_info(&auth_mode, org_id, basic_list_id);
+
+        // Best-effort credential resolution: a broken credential logs a
+        // warning and the route still loads (the upstream will just 401 /
+        // fail the handshake, same as before the credential existed).
+        let basic_authorization = match basic_auth_cred_id {
+            Some(cid) => match crate::credentials::basic_auth_credential(&state.pool, cid).await {
+                Ok((user, pass)) => Some(format!(
+                    "Basic {}",
+                    base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        format!("{user}:{pass}"),
+                    )
+                )),
+                Err(e) => {
+                    tracing::warn!(host = %host, "tunnel basic_auth credential unusable: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        let (client_cert_pem, client_key_pem) = match client_cert_cred_id {
+            Some(cid) => match crate::credentials::client_cert_credential(&state.pool, cid).await {
+                Ok((cert, key)) => (Some(cert), Some(key)),
+                Err(e) => {
+                    tracing::warn!(host = %host, "tunnel client_cert credential unusable: {e}");
+                    (None, None)
+                }
+            },
+            None => (None, None),
+        };
+
         routes.push(RouteEntry {
             host,
             path_prefix,
@@ -456,6 +505,9 @@ async fn get_routes(
                 url: tunnel_url,
                 proxy_token: String::new(),
                 passthrough_host,
+                basic_authorization,
+                client_cert_pem,
+                client_key_pem,
             }),
             auth,
         });

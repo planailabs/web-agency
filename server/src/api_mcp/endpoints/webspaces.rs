@@ -67,6 +67,10 @@ pub struct WebspaceData {
     /// Tunnel folders: pass the visitor's Host header through to the upstream
     /// instead of rewriting it to the tunnel URL's hostname.
     pub tunnel_passthrough_host: bool,
+    /// Tunnel folders: client_cert credential presented to the upstream (mTLS).
+    pub tunnel_client_cert_credential_id: Option<Uuid>,
+    /// Tunnel folders: basic_auth credential injected as Authorization header.
+    pub tunnel_basic_auth_credential_id: Option<Uuid>,
     pub organization_id: Uuid,
     pub organization_name: String,
     /// Whether the caller can manage tokens for this webspace's org.
@@ -143,6 +147,18 @@ pub struct WebspaceUpdateInput {
     /// Absent = keep the current setting.
     #[serde(default)]
     pub tunnel_passthrough_host: Option<bool>,
+    /// Tunnel folders: new client_cert credential. Absent = keep current.
+    #[serde(default)]
+    pub tunnel_client_cert_credential_id: Option<Uuid>,
+    /// Set true to clear the client cert (when the id is absent).
+    #[serde(default)]
+    pub clear_tunnel_client_cert: Option<bool>,
+    /// Tunnel folders: new basic_auth credential. Absent = keep current.
+    #[serde(default)]
+    pub tunnel_basic_auth_credential_id: Option<Uuid>,
+    /// Set true to clear the basic-auth credential (when the id is absent).
+    #[serde(default)]
+    pub clear_tunnel_basic_auth: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -399,13 +415,15 @@ pub async fn webspace_get(
 
     principal.require_read(&org_id)?;
 
-    let tunnel_passthrough_host = sqlx::query_scalar::<_, bool>(
-        "SELECT tunnel_passthrough_host FROM webspaces WHERE id = $1",
-    )
-    .bind(input.id)
-    .fetch_one(pool)
-    .await
-    .map_err(super::internal)?;
+    let (tunnel_passthrough_host, tunnel_client_cert_credential_id, tunnel_basic_auth_credential_id) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            "SELECT tunnel_passthrough_host, tunnel_client_cert_credential_id, \
+             tunnel_basic_auth_credential_id FROM webspaces WHERE id = $1",
+        )
+        .bind(input.id)
+        .fetch_one(pool)
+        .await
+        .map_err(super::internal)?;
 
     // Fetch basic auth list name if set
     let auth_basic_list_name = if let Some(list_id) = auth_basic_list_id {
@@ -509,6 +527,8 @@ pub async fn webspace_get(
         relay_url,
         relay_credential_id,
         tunnel_passthrough_host,
+        tunnel_client_cert_credential_id,
+        tunnel_basic_auth_credential_id,
         organization_id: org_id,
         organization_name: org_name,
         is_org_admin,
@@ -576,6 +596,33 @@ pub async fn webspace_create(
     Ok(id)
 }
 
+/// A credential must have the expected type and be visible to the webspace's
+/// org (owned by it, or global) before a folder may reference it.
+#[cfg(feature = "server")]
+async fn require_usable_credential(
+    pool: &sqlx::PgPool,
+    cred_id: Uuid,
+    expected_type: &str,
+    org_id: Uuid,
+) -> Result<(), ApiError> {
+    let row = sqlx::query_as::<_, (String, Option<Uuid>)>(
+        "SELECT credential_type, organization_id FROM credentials WHERE id = $1",
+    )
+    .bind(cred_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(super::internal)?;
+    match row {
+        Some((ctype, corg)) if ctype == expected_type && (corg.is_none() || corg == Some(org_id)) => {
+            Ok(())
+        }
+        // One generic error so credential ids can't be probed cross-org.
+        _ => Err(ApiError::bad_request(format!(
+            "credential is not a usable {expected_type} credential"
+        ))),
+    }
+}
+
 /// Update a webspace folder's settings (requires org write). Only provided
 /// fields change: display name, mount path, upstream URL (relay/tunnel) and
 /// auth mode/basic-auth list. Notifies the proxy.
@@ -599,11 +646,13 @@ pub async fn webspace_update(
             String,
             Option<Uuid>,
             bool,
+            Option<Uuid>,
+            Option<Uuid>,
         ),
     >(
         "SELECT organization_id, hosting_type, cloudflare_pages_project, cloudflare_credential_id, \
          name, path_prefix, relay_url, relay_credential_id, auth_mode, auth_basic_list_id, \
-         tunnel_passthrough_host \
+         tunnel_passthrough_host, tunnel_client_cert_credential_id, tunnel_basic_auth_credential_id \
          FROM webspaces WHERE id = $1",
     )
     .bind(input.id)
@@ -624,6 +673,8 @@ pub async fn webspace_update(
         cur_auth_mode,
         cur_auth_list,
         cur_tunnel_passthrough,
+        cur_tunnel_client_cert,
+        cur_tunnel_basic_auth,
     ) = row;
 
     principal.require_write(&org_id)?;
@@ -670,10 +721,35 @@ pub async fn webspace_update(
     let tunnel_passthrough_host = input
         .tunnel_passthrough_host
         .unwrap_or(cur_tunnel_passthrough);
+    let tunnel_client_cert = if input.tunnel_client_cert_credential_id.is_some() {
+        input.tunnel_client_cert_credential_id
+    } else if input.clear_tunnel_client_cert == Some(true) {
+        None
+    } else {
+        cur_tunnel_client_cert
+    };
+    let tunnel_basic_auth = if input.tunnel_basic_auth_credential_id.is_some() {
+        input.tunnel_basic_auth_credential_id
+    } else if input.clear_tunnel_basic_auth == Some(true) {
+        None
+    } else {
+        cur_tunnel_basic_auth
+    };
+    // Newly assigned tunnel credentials must be of the right type and visible
+    // to this org (own or global) — otherwise an org member could point a
+    // folder at another org's credential and exfiltrate it via their upstream.
+    if input.tunnel_client_cert_credential_id.is_some() && tunnel_client_cert != cur_tunnel_client_cert {
+        require_usable_credential(pool, tunnel_client_cert.unwrap(), "client_cert", org_id).await?;
+    }
+    if input.tunnel_basic_auth_credential_id.is_some() && tunnel_basic_auth != cur_tunnel_basic_auth {
+        require_usable_credential(pool, tunnel_basic_auth.unwrap(), "basic_auth", org_id).await?;
+    }
 
     sqlx::query(
         "UPDATE webspaces SET name = $1, path_prefix = $2, relay_url = $3, relay_credential_id = $4, \
-         auth_mode = $5, auth_basic_list_id = $6, tunnel_passthrough_host = $7, updated_at = now() WHERE id = $8",
+         auth_mode = $5, auth_basic_list_id = $6, tunnel_passthrough_host = $7, \
+         tunnel_client_cert_credential_id = $8, tunnel_basic_auth_credential_id = $9, \
+         updated_at = now() WHERE id = $10",
     )
     .bind(&name)
     .bind(&path_prefix)
@@ -682,6 +758,8 @@ pub async fn webspace_update(
     .bind(&auth_mode)
     .bind(auth_basic_list_id)
     .bind(tunnel_passthrough_host)
+    .bind(tunnel_client_cert)
+    .bind(tunnel_basic_auth)
     .bind(input.id)
     .execute(pool)
     .await

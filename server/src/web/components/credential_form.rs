@@ -106,6 +106,8 @@ pub fn CredentialForm() -> Element {
                             "spaceship" => data_json.set(r#"{"api_key": "", "api_secret": ""}"#.to_string()),
                             "mac-mgmt" => data_json.set(r#"{"server_url": "", "token": ""}"#.to_string()),
                             "changedetection" => data_json.set(r#"{"api_url": "", "api_key": "", "group": ""}"#.to_string()),
+                            "client_cert" => data_json.set(r#"{"cert_pem": "", "key_pem": ""}"#.to_string()),
+                            "basic_auth" => data_json.set(r#"{"username": "", "password": ""}"#.to_string()),
                             _ => {}
                         }
                         credential_type.set(val);
@@ -114,6 +116,8 @@ pub fn CredentialForm() -> Element {
                     option { value: "spaceship", "Spaceship" }
                     option { value: "mac-mgmt", "mac-mgmt (Relay)" }
                     option { value: "changedetection", "ChangeDetection.io" }
+                    option { value: "client_cert", "TLS Client Certificate (Tunnel)" }
+                    option { value: "basic_auth", "Basic Auth (Tunnel)" }
                 }
             }
 

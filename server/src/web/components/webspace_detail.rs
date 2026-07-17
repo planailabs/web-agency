@@ -48,6 +48,51 @@ async fn list_cf_creds_for_pages() -> Result<Vec<CredOption>, ServerFnError> {
         .collect())
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct TunnelCredOptions {
+    client_certs: Vec<CredOption>,
+    basic_auths: Vec<CredOption>,
+}
+
+/// client_cert + basic_auth credentials visible to the current user
+/// (all for admins, org-scoped + global otherwise), for the tunnel pickers.
+#[server]
+async fn load_tunnel_creds() -> Result<TunnelCredOptions, ServerFnError> {
+    let user = crate::web::user::current_user().await?;
+    let pool = crate::server_pool()?;
+    let mut out = TunnelCredOptions::default();
+    for (ctype, target) in [("client_cert", 0usize), ("basic_auth", 1usize)] {
+        let rows = if user.is_admin {
+            sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, name FROM credentials WHERE credential_type = $1 ORDER BY name",
+            )
+            .bind(ctype)
+            .fetch_all(&pool)
+            .await
+        } else {
+            sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, name FROM credentials WHERE credential_type = $1 \
+                 AND (organization_id = ANY($2) OR organization_id IS NULL) ORDER BY name",
+            )
+            .bind(ctype)
+            .bind(&user.org_ids())
+            .fetch_all(&pool)
+            .await
+        }
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        let opts = rows
+            .into_iter()
+            .map(|(id, name)| CredOption { id, name })
+            .collect();
+        if target == 0 {
+            out.client_certs = opts;
+        } else {
+            out.basic_auths = opts;
+        }
+    }
+    Ok(out)
+}
+
 // ── Deployments & tokens ─────────────────────────────────────────────
 // Deploy-token create/list/revoke live in the shared api_mcp `tokens`
 // endpoints (imported above).
@@ -162,6 +207,8 @@ pub fn WebspaceDetail(id: String) -> Element {
             current_relay_url: data.relay_url.clone(),
             current_relay_credential_id: data.relay_credential_id,
             current_tunnel_passthrough: data.tunnel_passthrough_host,
+            current_tunnel_client_cert: data.tunnel_client_cert_credential_id,
+            current_tunnel_basic_auth: data.tunnel_basic_auth_credential_id,
         }
 
         // CF Pages deployment
@@ -1039,11 +1086,23 @@ fn WebspaceSettingsSection(
     current_relay_url: Option<String>,
     current_relay_credential_id: Option<Uuid>,
     current_tunnel_passthrough: bool,
+    current_tunnel_client_cert: Option<Uuid>,
+    current_tunnel_basic_auth: Option<Uuid>,
 ) -> Element {
     let mut refresh: Signal<u32> = use_context();
     let mut name = use_signal(move || current_name.clone());
     let mut relay_url = use_signal(move || current_relay_url.clone().unwrap_or_default());
     let mut tunnel_passthrough = use_signal(move || current_tunnel_passthrough);
+    let mut tunnel_cert_id = use_signal(move || {
+        current_tunnel_client_cert
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+    });
+    let mut tunnel_basic_id = use_signal(move || {
+        current_tunnel_basic_auth
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+    });
     let relay_cred_id = use_signal(move || {
         current_relay_credential_id
             .map(|id| id.to_string())
@@ -1053,7 +1112,8 @@ fn WebspaceSettingsSection(
     let mut message = use_signal(|| None::<String>);
 
     let is_relay = hosting_type == "relay";
-    let is_relay_or_tunnel = is_relay || hosting_type == "tunnel";
+    let is_tunnel = hosting_type == "tunnel";
+    let is_relay_or_tunnel = is_relay || is_tunnel;
 
     // mac-mgmt credentials for the relay picker; only fetched for relay
     // folders (hooks must run unconditionally, so gate inside).
@@ -1067,6 +1127,22 @@ fn WebspaceSettingsSection(
             }
         }
     })?;
+
+    // client_cert/basic_auth credentials for the tunnel pickers.
+    let tunnel_creds = use_server_future(move || {
+        let want = is_tunnel;
+        async move {
+            if want {
+                load_tunnel_creds().await
+            } else {
+                Ok(TunnelCredOptions::default())
+            }
+        }
+    })?;
+    let tunnel_cred_opts = match &*tunnel_creds.read() {
+        Some(Ok(opts)) => opts.clone(),
+        _ => TunnelCredOptions::default(),
+    };
     let mut relay_creds = match &*creds.read() {
         Some(Ok(rows)) => rows.clone(),
         _ => Vec::new(),
@@ -1113,7 +1189,7 @@ fn WebspaceSettingsSection(
                         }
                     }
 
-                    if hosting_type == "tunnel" {
+                    if is_tunnel {
                         FormField { label: "Host header",
                             label { class: "flex items-center gap-2 text-sm h-9",
                                 input {
@@ -1124,6 +1200,28 @@ fn WebspaceSettingsSection(
                                 "Pass through visitor's Host header"
                             }
                         }
+                        FormField { label: "Client certificate (mTLS)",
+                            select {
+                                class: "input",
+                                value: "{tunnel_cert_id}",
+                                oninput: move |evt| tunnel_cert_id.set(evt.value()),
+                                option { value: "", "None" }
+                                for c in &tunnel_cred_opts.client_certs {
+                                    option { value: "{c.id}", "{c.name}" }
+                                }
+                            }
+                        }
+                        FormField { label: "Basic auth to upstream",
+                            select {
+                                class: "input",
+                                value: "{tunnel_basic_id}",
+                                oninput: move |evt| tunnel_basic_id.set(evt.value()),
+                                option { value: "", "None" }
+                                for c in &tunnel_cred_opts.basic_auths {
+                                    option { value: "{c.id}", "{c.name}" }
+                                }
+                            }
+                        }
                     }
 
                     Button {
@@ -1131,7 +1229,6 @@ fn WebspaceSettingsSection(
                         disabled: *saving.read(),
                         onclick: {
                             let wid = webspace_id;
-                            let is_tunnel = hosting_type == "tunnel";
                             move |_| {
                                 let n = name.read().clone();
                                 let url = if is_relay_or_tunnel {
@@ -1150,6 +1247,13 @@ fn WebspaceSettingsSection(
                                 } else {
                                     None
                                 };
+                                let (cert_id, clear_cert, basic_id, clear_basic) = if is_tunnel {
+                                    let c = Uuid::parse_str(tunnel_cert_id.read().as_str()).ok();
+                                    let b = Uuid::parse_str(tunnel_basic_id.read().as_str()).ok();
+                                    (c, Some(c.is_none()), b, Some(b.is_none()))
+                                } else {
+                                    (None, None, None, None)
+                                };
                                 saving.set(true);
                                 message.set(None);
                                 spawn(async move {
@@ -1165,6 +1269,10 @@ fn WebspaceSettingsSection(
                                         auth_basic_list_id: None,
                                         clear_auth_basic_list: None,
                                         tunnel_passthrough_host: passthrough,
+                                        tunnel_client_cert_credential_id: cert_id,
+                                        clear_tunnel_client_cert: clear_cert,
+                                        tunnel_basic_auth_credential_id: basic_id,
+                                        clear_tunnel_basic_auth: clear_basic,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));
@@ -1298,6 +1406,10 @@ fn AuthSettingsSection(
                                         auth_basic_list_id: list_id,
                                         clear_auth_basic_list,
                                         tunnel_passthrough_host: None,
+                                        tunnel_client_cert_credential_id: None,
+                                        clear_tunnel_client_cert: None,
+                                        tunnel_basic_auth_credential_id: None,
+                                        clear_tunnel_basic_auth: None,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));

@@ -39,6 +39,14 @@ struct RelayInfoEntry {
     /// relay hostname (tunnel folders only). Default off.
     #[serde(default)]
     passthrough_host: bool,
+    /// Ready-to-send Authorization header value for the upstream (tunnel folders).
+    #[serde(default)]
+    basic_authorization: Option<String>,
+    /// PEM client certificate chain + key for mTLS to the upstream (tunnel folders).
+    #[serde(default)]
+    client_cert_pem: Option<String>,
+    #[serde(default)]
+    client_key_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +54,21 @@ struct AuthInfoEntry {
     mode: String,
     org_id: Option<uuid::Uuid>,
     basic_list_id: Option<uuid::Uuid>,
+}
+
+/// Parse a PEM cert chain + key into a Pingora `CertKey` for upstream mTLS.
+fn parse_client_cert(
+    cert_pem: &str,
+    key_pem: &str,
+) -> anyhow::Result<pingora::utils::tls::CertKey> {
+    let certs = pingora::tls::x509::X509::stack_from_pem(cert_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid cert PEM: {e}"))?;
+    if certs.is_empty() {
+        anyhow::bail!("cert PEM contained no certificates");
+    }
+    let key = pingora::tls::pkey::PKey::private_key_from_pem(key_pem.as_bytes())
+        .map_err(|e| anyhow::anyhow!("invalid key PEM: {e}"))?;
+    Ok(pingora::utils::tls::CertKey::new(certs, key))
 }
 
 fn auth_headers(token: &str) -> reqwest::header::HeaderMap {
@@ -108,6 +131,16 @@ async fn reload_routes(
                             .unwrap_or("")
                             .to_string();
                         let tls = relay.url.starts_with("https://");
+                        let client_cert = match (&relay.client_cert_pem, &relay.client_key_pem) {
+                            (Some(cert), Some(key)) => match parse_client_cert(cert, key) {
+                                Ok(ck) => Some(Arc::new(ck)),
+                                Err(e) => {
+                                    tracing::error!(host = %entry.host, "bad tunnel client cert: {e}");
+                                    None
+                                }
+                            },
+                            _ => None,
+                        };
                         Route::Relay {
                             upstream: entry.upstream,
                             url: relay.url,
@@ -116,6 +149,8 @@ async fn reload_routes(
                             tls,
                             proxy_token: relay.proxy_token,
                             passthrough_host: relay.passthrough_host,
+                            basic_authorization: relay.basic_authorization,
+                            client_cert,
                         }
                     } else {
                         Route::Direct(entry.upstream)

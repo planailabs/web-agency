@@ -210,6 +210,45 @@ pub async fn changedetection_client(
     ))
 }
 
+/// PEM certificate chain + private key from a `client_cert` credential
+/// (presented to tunnel upstreams as a TLS client certificate).
+pub async fn client_cert_credential(
+    pool: &PgPool,
+    cred_id: Uuid,
+) -> anyhow::Result<(String, String)> {
+    let data = credential_json(pool, cred_id, "client_cert").await?;
+    let cert = data["cert_pem"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing cert_pem"))?
+        .to_string();
+    let key = data["key_pem"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing key_pem"))?
+        .to_string();
+    Ok((cert, key))
+}
+
+/// Username + password from a `basic_auth` credential (injected as an
+/// Authorization header toward tunnel upstreams).
+pub async fn basic_auth_credential(
+    pool: &PgPool,
+    cred_id: Uuid,
+) -> anyhow::Result<(String, String)> {
+    let data = credential_json(pool, cred_id, "basic_auth").await?;
+    let username = data["username"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("missing username"))?
+        .to_string();
+    let password = data["password"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing password"))?
+        .to_string();
+    Ok((username, password))
+}
+
 /// Build a Spaceship API client from a stored credential.
 pub async fn spaceship_client(
     pool: &PgPool,

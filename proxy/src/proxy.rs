@@ -33,6 +33,12 @@ pub enum Route {
         /// Keep the visitor's Host header instead of rewriting to `relay_host`
         /// (tunnel folders only; SNI still uses the relay hostname).
         passthrough_host: bool,
+        /// Ready-to-send Authorization header value for the upstream
+        /// (tunnel folders with a basic_auth credential).
+        basic_authorization: Option<String>,
+        /// Client certificate presented to the upstream during the TLS
+        /// handshake (tunnel folders with a client_cert credential).
+        client_cert: Option<Arc<pingora::utils::tls::CertKey>>,
     },
 }
 
@@ -68,6 +74,7 @@ struct RelayCtx {
     proxy_token: String,
     path_prefix: String,
     passthrough_host: bool,
+    basic_authorization: Option<String>,
 }
 
 /// One mounted folder under a host: its path prefix, route target, and auth.
@@ -711,6 +718,8 @@ impl ProxyHttp for WebAgencyProxy {
                     sni,
                     proxy_token,
                     passthrough_host,
+                    basic_authorization,
+                    client_cert,
                 },
                 _,
             )) => {
@@ -734,9 +743,11 @@ impl ProxyHttp for WebAgencyProxy {
                     proxy_token: proxy_token.clone(),
                     path_prefix,
                     passthrough_host: *passthrough_host,
+                    basic_authorization: basic_authorization.clone(),
                 });
 
-                let peer = HttpPeer::new(upstream.as_str(), *tls, sni.clone());
+                let mut peer = HttpPeer::new(upstream.as_str(), *tls, sni.clone());
+                peer.client_cert_key = client_cert.clone();
                 Ok(Box::new(peer))
             }
             Some((
@@ -824,6 +835,20 @@ impl ProxyHttp for WebAgencyProxy {
                         pingora::Error::because(
                             pingora::ErrorType::InternalError,
                             "failed to set proxy token header",
+                            e,
+                        )
+                    })?;
+            }
+
+            // Basic-auth credential toward the tunnel upstream (replaces any
+            // client-supplied Authorization so visitors can't override it).
+            if let Some(authz) = &relay.basic_authorization {
+                upstream_request
+                    .insert_header("authorization", authz)
+                    .map_err(|e| {
+                        pingora::Error::because(
+                            pingora::ErrorType::InternalError,
+                            "failed to set authorization header",
                             e,
                         )
                     })?;

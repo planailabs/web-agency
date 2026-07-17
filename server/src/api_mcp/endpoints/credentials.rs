@@ -364,6 +364,25 @@ pub async fn credential_test(
                 info.watch_count.unwrap_or(0),
             ))
         }
+        // No upstream to call for these; validate the stored payload shape.
+        "client_cert" => {
+            let (cert, key) = crate::credentials::client_cert_credential(pool, input.id)
+                .await
+                .map_err(|e| ApiError::internal(format!("{e}")))?;
+            if !cert.contains("BEGIN CERTIFICATE") {
+                return Err(ApiError::bad_request("cert_pem is not a PEM certificate"));
+            }
+            if !key.contains("PRIVATE KEY") {
+                return Err(ApiError::bad_request("key_pem is not a PEM private key"));
+            }
+            Ok("OK — certificate and key PEM present".into())
+        }
+        "basic_auth" => {
+            let (username, _) = crate::credentials::basic_auth_credential(pool, input.id)
+                .await
+                .map_err(|e| ApiError::internal(format!("{e}")))?;
+            Ok(format!("OK — username '{username}' set"))
+        }
         _ => Err(ApiError::bad_request("unknown credential type")),
     }
 }
