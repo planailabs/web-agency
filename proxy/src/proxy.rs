@@ -30,6 +30,9 @@ pub enum Route {
         sni: String,
         /// Proxy token to inject as X-Proxy-Token header
         proxy_token: String,
+        /// Keep the visitor's Host header instead of rewriting to `relay_host`
+        /// (tunnel folders only; SNI still uses the relay hostname).
+        passthrough_host: bool,
     },
 }
 
@@ -64,6 +67,7 @@ struct RelayCtx {
     host: String,
     proxy_token: String,
     path_prefix: String,
+    passthrough_host: bool,
 }
 
 /// One mounted folder under a host: its path prefix, route target, and auth.
@@ -706,6 +710,7 @@ impl ProxyHttp for WebAgencyProxy {
                     tls,
                     sni,
                     proxy_token,
+                    passthrough_host,
                 },
                 _,
             )) => {
@@ -728,6 +733,7 @@ impl ProxyHttp for WebAgencyProxy {
                     host: relay_host.clone(),
                     proxy_token: proxy_token.clone(),
                     path_prefix,
+                    passthrough_host: *passthrough_host,
                 });
 
                 let peer = HttpPeer::new(upstream.as_str(), *tls, sni.clone());
@@ -796,16 +802,19 @@ impl ProxyHttp for WebAgencyProxy {
         }
 
         if let Some(relay) = &ctx.relay {
-            // Rewrite Host header to the relay hostname
-            upstream_request
-                .insert_header("host", &relay.host)
-                .map_err(|e| {
-                    pingora::Error::because(
-                        pingora::ErrorType::InternalError,
-                        "failed to set host header",
-                        e,
-                    )
-                })?;
+            // Rewrite Host header to the relay hostname, unless the folder
+            // opted into passing the visitor's Host through.
+            if !relay.passthrough_host {
+                upstream_request
+                    .insert_header("host", &relay.host)
+                    .map_err(|e| {
+                        pingora::Error::because(
+                            pingora::ErrorType::InternalError,
+                            "failed to set host header",
+                            e,
+                        )
+                    })?;
+            }
 
             // Inject proxy token (if present — relay type has one, tunnel type doesn't)
             if !relay.proxy_token.is_empty() {

@@ -122,6 +122,9 @@ struct RelayInfo {
     url: String,
     /// Minted proxy token for authenticating with the relay
     proxy_token: String,
+    /// Pass the visitor's Host header through instead of rewriting it to the
+    /// relay URL's hostname (tunnel folders only).
+    passthrough_host: bool,
 }
 
 #[derive(Serialize, serde::Deserialize, Clone)]
@@ -388,6 +391,7 @@ async fn get_routes(
             relay: Some(RelayInfo {
                 url: relay_url,
                 proxy_token,
+                passthrough_host: false,
             }),
             auth,
         });
@@ -404,9 +408,10 @@ async fn get_routes(
             uuid::Uuid,
             String,
             Option<uuid::Uuid>,
+            bool,
         ),
     >(
-        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.organization_id, w.auth_mode, w.auth_basic_list_id \
+        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.organization_id, w.auth_mode, w.auth_basic_list_id, w.tunnel_passthrough_host \
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id AND h.kind = 'proxy' \
          JOIN webspaces w ON w.webspace_host_id = h.id \
@@ -418,8 +423,16 @@ async fn get_routes(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    for (domain, subdomain, path_prefix, tunnel_url, org_id, auth_mode, basic_list_id) in
-        tunnel_rows
+    for (
+        domain,
+        subdomain,
+        path_prefix,
+        tunnel_url,
+        org_id,
+        auth_mode,
+        basic_list_id,
+        passthrough_host,
+    ) in tunnel_rows
     {
         let host = match subdomain.as_deref() {
             Some(sub) if sub != "@" => format!("{sub}.{domain}"),
@@ -442,6 +455,7 @@ async fn get_routes(
             relay: Some(RelayInfo {
                 url: tunnel_url,
                 proxy_token: String::new(),
+                passthrough_host,
             }),
             auth,
         });

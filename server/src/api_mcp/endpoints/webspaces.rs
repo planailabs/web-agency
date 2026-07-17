@@ -64,6 +64,9 @@ pub struct WebspaceData {
     pub relay_url: Option<String>,
     /// mac-mgmt credential backing the relay URL pickers (relay folders).
     pub relay_credential_id: Option<Uuid>,
+    /// Tunnel folders: pass the visitor's Host header through to the upstream
+    /// instead of rewriting it to the tunnel URL's hostname.
+    pub tunnel_passthrough_host: bool,
     pub organization_id: Uuid,
     pub organization_name: String,
     /// Whether the caller can manage tokens for this webspace's org.
@@ -136,6 +139,10 @@ pub struct WebspaceUpdateInput {
     /// Set true to clear the basic-auth list (when `auth_basic_list_id` is absent).
     #[serde(default)]
     pub clear_auth_basic_list: Option<bool>,
+    /// Tunnel folders: pass the visitor's Host header through to the upstream.
+    /// Absent = keep the current setting.
+    #[serde(default)]
+    pub tunnel_passthrough_host: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -357,6 +364,7 @@ pub async fn webspace_get(
     principal: &Principal,
     input: WebspaceGetInput,
 ) -> Result<WebspaceData, ApiError> {
+    // sqlx tuples cap at 16 elements; the tunnel flag is fetched separately below.
     let row = sqlx::query_as::<_, (Uuid, String, String, Option<String>, Option<Uuid>, Option<String>, Option<String>, Uuid, Option<String>, Option<Uuid>, String, Option<Uuid>, Uuid, String, String, String)>(
         "SELECT w.id, w.name, w.hosting_type, w.cloudflare_pages_project, w.cloudflare_credential_id, \
          w.runtime, w.local_status, w.organization_id, w.relay_url, w.relay_credential_id, \
@@ -390,6 +398,14 @@ pub async fn webspace_get(
     ) = row;
 
     principal.require_read(&org_id)?;
+
+    let tunnel_passthrough_host = sqlx::query_scalar::<_, bool>(
+        "SELECT tunnel_passthrough_host FROM webspaces WHERE id = $1",
+    )
+    .bind(input.id)
+    .fetch_one(pool)
+    .await
+    .map_err(super::internal)?;
 
     // Fetch basic auth list name if set
     let auth_basic_list_name = if let Some(list_id) = auth_basic_list_id {
@@ -492,6 +508,7 @@ pub async fn webspace_get(
         local_status,
         relay_url,
         relay_credential_id,
+        tunnel_passthrough_host,
         organization_id: org_id,
         organization_name: org_name,
         is_org_admin,
@@ -581,10 +598,12 @@ pub async fn webspace_update(
             Option<Uuid>,
             String,
             Option<Uuid>,
+            bool,
         ),
     >(
         "SELECT organization_id, hosting_type, cloudflare_pages_project, cloudflare_credential_id, \
-         name, path_prefix, relay_url, relay_credential_id, auth_mode, auth_basic_list_id \
+         name, path_prefix, relay_url, relay_credential_id, auth_mode, auth_basic_list_id, \
+         tunnel_passthrough_host \
          FROM webspaces WHERE id = $1",
     )
     .bind(input.id)
@@ -604,6 +623,7 @@ pub async fn webspace_update(
         cur_relay_cred,
         cur_auth_mode,
         cur_auth_list,
+        cur_tunnel_passthrough,
     ) = row;
 
     principal.require_write(&org_id)?;
@@ -647,10 +667,13 @@ pub async fn webspace_update(
     } else {
         cur_auth_list
     };
+    let tunnel_passthrough_host = input
+        .tunnel_passthrough_host
+        .unwrap_or(cur_tunnel_passthrough);
 
     sqlx::query(
         "UPDATE webspaces SET name = $1, path_prefix = $2, relay_url = $3, relay_credential_id = $4, \
-         auth_mode = $5, auth_basic_list_id = $6, updated_at = now() WHERE id = $7",
+         auth_mode = $5, auth_basic_list_id = $6, tunnel_passthrough_host = $7, updated_at = now() WHERE id = $8",
     )
     .bind(&name)
     .bind(&path_prefix)
@@ -658,6 +681,7 @@ pub async fn webspace_update(
     .bind(relay_credential_id)
     .bind(&auth_mode)
     .bind(auth_basic_list_id)
+    .bind(tunnel_passthrough_host)
     .bind(input.id)
     .execute(pool)
     .await

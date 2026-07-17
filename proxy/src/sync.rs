@@ -35,6 +35,10 @@ fn default_path_prefix() -> String {
 struct RelayInfoEntry {
     url: String,
     proxy_token: String,
+    /// Pass the visitor's Host header through instead of rewriting it to the
+    /// relay hostname (tunnel folders only). Default off.
+    #[serde(default)]
+    passthrough_host: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +115,7 @@ async fn reload_routes(
                             relay_host,
                             tls,
                             proxy_token: relay.proxy_token,
+                            passthrough_host: relay.passthrough_host,
                         }
                     } else {
                         Route::Direct(entry.upstream)

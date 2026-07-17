@@ -161,6 +161,7 @@ pub fn WebspaceDetail(id: String) -> Element {
             hosting_type: data.hosting_type.clone(),
             current_relay_url: data.relay_url.clone(),
             current_relay_credential_id: data.relay_credential_id,
+            current_tunnel_passthrough: data.tunnel_passthrough_host,
         }
 
         // CF Pages deployment
@@ -1037,10 +1038,12 @@ fn WebspaceSettingsSection(
     hosting_type: String,
     current_relay_url: Option<String>,
     current_relay_credential_id: Option<Uuid>,
+    current_tunnel_passthrough: bool,
 ) -> Element {
     let mut refresh: Signal<u32> = use_context();
     let mut name = use_signal(move || current_name.clone());
     let mut relay_url = use_signal(move || current_relay_url.clone().unwrap_or_default());
+    let mut tunnel_passthrough = use_signal(move || current_tunnel_passthrough);
     let relay_cred_id = use_signal(move || {
         current_relay_credential_id
             .map(|id| id.to_string())
@@ -1110,11 +1113,25 @@ fn WebspaceSettingsSection(
                         }
                     }
 
+                    if hosting_type == "tunnel" {
+                        FormField { label: "Host header",
+                            label { class: "flex items-center gap-2 text-sm h-9",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: *tunnel_passthrough.read(),
+                                    oninput: move |evt| tunnel_passthrough.set(evt.checked()),
+                                }
+                                "Pass through visitor's Host header"
+                            }
+                        }
+                    }
+
                     Button {
                         variant: ButtonVariant::Primary,
                         disabled: *saving.read(),
                         onclick: {
                             let wid = webspace_id;
+                            let is_tunnel = hosting_type == "tunnel";
                             move |_| {
                                 let n = name.read().clone();
                                 let url = if is_relay_or_tunnel {
@@ -1125,6 +1142,11 @@ fn WebspaceSettingsSection(
                                 };
                                 let cred = if is_relay {
                                     Uuid::parse_str(relay_cred_id.read().as_str()).ok()
+                                } else {
+                                    None
+                                };
+                                let passthrough = if is_tunnel {
+                                    Some(*tunnel_passthrough.read())
                                 } else {
                                     None
                                 };
@@ -1142,6 +1164,7 @@ fn WebspaceSettingsSection(
                                         auth_mode: None,
                                         auth_basic_list_id: None,
                                         clear_auth_basic_list: None,
+                                        tunnel_passthrough_host: passthrough,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));
@@ -1274,6 +1297,7 @@ fn AuthSettingsSection(
                                         auth_mode: Some(mode),
                                         auth_basic_list_id: list_id,
                                         clear_auth_basic_list,
+                                        tunnel_passthrough_host: None,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));
