@@ -43,7 +43,8 @@ async fn run_checks(pool: &PgPool) -> anyhow::Result<()> {
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id \
          JOIN domains d ON d.id = whd.domain_id \
-         LEFT JOIN subdomains s ON s.id = whd.subdomain_id",
+         LEFT JOIN subdomains s ON s.id = whd.subdomain_id \
+         WHERE s.name IS DISTINCT FROM '*'", // wildcard bindings have no fetchable URL
     )
     .fetch_all(pool)
     .await?;

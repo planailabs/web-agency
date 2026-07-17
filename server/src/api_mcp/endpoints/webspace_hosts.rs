@@ -372,13 +372,16 @@ async fn create_host_cname(
         .await
         .map_err(|e| ApiError::internal(format!("{e}")))?;
 
+    // Wildcard records must stay DNS-only: Cloudflare supports wildcards,
+    // just not proxying them for this flow.
+    let proxied = !hostname.starts_with("*.");
     let record = cloudflare_api::compat::CreateDnsRecord {
         record_type: "CNAME".into(),
         name: hostname.to_string(),
         content: Some(cname_target.to_string()),
         data: None,
         ttl: Some(1),
-        proxied: Some(true),
+        proxied: Some(proxied),
         comment: Some(comment.to_string()),
         priority: None,
     };
@@ -423,9 +426,9 @@ async fn create_host_cname(
     };
     let _ = sqlx::query(
         "INSERT INTO dns_records (subdomain_id, domain_id, name, record_type, record_value, proxied, cloudflare_record_id) \
-         VALUES ($1, $2, $3, 'CNAME', $4, true, $5) ON CONFLICT DO NOTHING",
+         VALUES ($1, $2, $3, 'CNAME', $4, $5, $6) ON CONFLICT DO NOTHING",
     )
-    .bind(sub_id).bind(domain_id).bind(&sub_name).bind(cname_target).bind(&created.id)
+    .bind(sub_id).bind(domain_id).bind(&sub_name).bind(cname_target).bind(proxied).bind(&created.id)
     .execute(pool).await;
 
     Ok(())

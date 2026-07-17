@@ -17,6 +17,7 @@ use super::ui::{
 
 // The host CRUD + domain-binding + ChangeDetection endpoints (and their DTOs)
 // live in the shared api_mcp layer.
+use crate::api_mcp::endpoints::domains::{SubdomainCreateInput, create_subdomain};
 use crate::api_mcp::endpoints::webspace_hosts::{
     DomainBinding, HostBindDomainInput, HostDeleteInput, HostFixCnameInput, HostGetInput,
     HostMoveInput, HostRecheckCustomDomainInput, HostSetChangedetectionInput,
@@ -651,6 +652,10 @@ fn DomainBindingsSection(host_id: Uuid, kind: String, bindings: Vec<DomainBindin
                                         rsx! { option { value: "{d.id}|{s.id}|{hostname}", "  {hostname}" } }
                                     }
                                 }
+                                // Wildcard bind: "*" sentinel creates the subdomain entity on submit.
+                                if !d.subdomains.iter().any(|s| s.name == "*") {
+                                    option { value: "{d.id}|*|*.{d.name}", "  *.{d.name} (wildcard)" }
+                                }
                             }
                         }
                     }
@@ -667,9 +672,17 @@ fn DomainBindingsSection(host_id: Uuid, kind: String, bindings: Vec<DomainBindin
                                     let parts: Vec<&str> = sel.split('|').collect();
                                     if parts.len() == 3 {
                                         let domain_id = Uuid::parse_str(parts[0]).ok();
-                                        let subdomain_id = Uuid::parse_str(parts[1]).ok();
                                         let hostname = parts[2].to_string();
                                         if let Some(domain_id) = domain_id {
+                                            // "*" sentinel: ensure the wildcard subdomain entity exists first.
+                                            let subdomain_id = if parts[1] == "*" {
+                                                match create_subdomain(SubdomainCreateInput { domain_id, name: "*".to_string() }).await {
+                                                    Ok(id) => Some(id),
+                                                    Err(e) => { error.set(Some(format!("{e}"))); adding.set(false); return; }
+                                                }
+                                            } else {
+                                                Uuid::parse_str(parts[1]).ok()
+                                            };
                                             match bind_domain(HostBindDomainInput { id: host_id, domain_id, subdomain_id, hostname }).await {
                                                 Ok(()) => { selected_domain.set(String::new()); refresh += 1; }
                                                 Err(e) => error.set(Some(format!("{e}"))),

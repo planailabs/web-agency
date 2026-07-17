@@ -480,8 +480,10 @@ async fn cb_host_ok(pool: &PgPool, list_id: Uuid, cb: &str) -> bool {
          JOIN domains d ON d.id = whd.domain_id \
          LEFT JOIN subdomains s ON s.id = whd.subdomain_id \
          WHERE w.auth_basic_list_id = $1 \
-           AND (CASE WHEN s.name IS NOT NULL AND s.name != '@' \
-                THEN s.name || '.' || d.name ELSE d.name END) = $2 \
+           AND ((CASE WHEN s.name IS NOT NULL AND s.name != '@' \
+                 THEN s.name || '.' || d.name ELSE d.name END) = $2 \
+                OR (s.name = '*' AND $2 LIKE '%.' || d.name \
+                    AND strpos(left($2, length($2) - length(d.name) - 1), '.') = 0)) \
          LIMIT 1",
     )
     .bind(list_id)

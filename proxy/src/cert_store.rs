@@ -58,12 +58,19 @@ impl CertStore {
         self.certs.load().contains_key(domain)
     }
 
+    /// Exact SNI match first, then the single-label wildcard cert
+    /// ("foo.example.com" → "*.example.com"), then the self-signed fallback.
     fn resolve(&self, sni: &str) -> Arc<CertKey> {
         let certs = self.certs.load();
-        certs
-            .get(sni)
-            .cloned()
-            .unwrap_or_else(|| self.fallback.clone())
+        if let Some(ck) = certs.get(sni) {
+            return ck.clone();
+        }
+        if let Some((_, rest)) = sni.split_once('.') {
+            if let Some(ck) = certs.get(&format!("*.{rest}")) {
+                return ck.clone();
+            }
+        }
+        self.fallback.clone()
     }
 }
 

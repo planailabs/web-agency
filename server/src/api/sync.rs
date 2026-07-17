@@ -591,6 +591,7 @@ async fn sync_changedetection_for_webspace(
 
     let hostnames: Vec<String> = bindings
         .iter()
+        .filter(|(_, sub)| sub.as_deref() != Some("*")) // no fetchable URL for wildcards
         .map(|(domain, sub)| match sub.as_deref() {
             Some(s) if s != "@" => format!("{s}.{domain}"),
             _ => domain.clone(),

@@ -105,6 +105,19 @@ fn match_folder<'a>(folders: &'a [Folder], path: &str) -> Option<&'a Folder> {
         .find(|(prefix, _, _)| path_matches(prefix, path))
 }
 
+/// Look up a host's folders: exact hostname first, then the single-label
+/// wildcard entry ("foo.example.com" → "*.example.com"), matching TLS
+/// wildcard-cert semantics. An exact binding always beats a wildcard one.
+fn host_folders<'a>(
+    routes: &'a HashMap<String, Vec<Folder>>,
+    host: &str,
+) -> Option<&'a Vec<Folder>> {
+    routes.get(host).or_else(|| {
+        let (_, rest) = host.split_once('.')?;
+        routes.get(&format!("*.{rest}"))
+    })
+}
+
 /// Reverse the request-path rewrite for a root-relative redirect Location:
 /// strip the relay URL's path prefix we prepended, then re-add the folder mount
 /// prefix we stripped. Inverse of the rewrite in `upstream_request_filter`.
@@ -623,7 +636,7 @@ impl ProxyHttp for WebAgencyProxy {
             let routes = self.routes.load();
             if routes.is_empty() {
                 HostState::Starting
-            } else if routes.contains_key(&host) {
+            } else if host_folders(&routes, &host).is_some() {
                 HostState::Known
             } else {
                 HostState::Unknown
@@ -650,7 +663,7 @@ impl ProxyHttp for WebAgencyProxy {
         // guard across awaits. Upstream selection happens in upstream_peer.
         let (mount, auth) = {
             let routes = self.routes.load();
-            match routes.get(&host).and_then(|f| match_folder(f, &req_path)) {
+            match host_folders(&routes, &host).and_then(|f| match_folder(f, &req_path)) {
                 Some((mount, _, auth)) => (mount.clone(), auth.clone()),
                 None => return Ok(false), // unmatched path → 404 via fail_to_proxy
             }
@@ -675,7 +688,7 @@ impl ProxyHttp for WebAgencyProxy {
         let req_path = session.req_header().uri.path().to_string();
 
         let routes = self.routes.load();
-        match routes.get(&host).and_then(|f| match_folder(f, &req_path)) {
+        match host_folders(&routes, &host).and_then(|f| match_folder(f, &req_path)) {
             Some((mount, Route::Direct(upstream), _)) => {
                 ctx.mount_prefix = mount.clone();
                 Ok(Box::new(HttpPeer::new(
@@ -1063,7 +1076,7 @@ pub fn build_service(
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_redirect_location;
+    use super::{host_folders, rewrite_redirect_location};
 
     #[test]
     fn redirect_location_rewrite() {
@@ -1092,5 +1105,28 @@ mod tests {
             rewrite_redirect_location("/other", "/v1", "/customer"),
             "/customer/other"
         );
+    }
+
+    #[test]
+    fn wildcard_host_lookup() {
+        use super::{AuthMode, Folder, Route};
+        use std::collections::HashMap;
+
+        let folder =
+            |tag: &str| -> Vec<Folder> { vec![(tag.into(), Route::Direct(tag.into()), AuthMode::None)] };
+        let mut routes: HashMap<String, Vec<Folder>> = HashMap::new();
+        routes.insert("www.example.com".into(), folder("exact"));
+        routes.insert("*.example.com".into(), folder("wild"));
+
+        let tag = |host: &str| host_folders(&routes, host).map(|f| f[0].0.as_str());
+        // Exact binding beats the wildcard.
+        assert_eq!(tag("www.example.com"), Some("exact"));
+        // Unbound subdomain falls back to the wildcard.
+        assert_eq!(tag("foo.example.com"), Some("wild"));
+        // Single-label only: deeper names don't match (mirrors TLS cert rules).
+        assert_eq!(tag("a.b.example.com"), None);
+        // The apex is not covered by "*".
+        assert_eq!(tag("example.com"), None);
+        assert_eq!(tag("other.org"), None);
     }
 }

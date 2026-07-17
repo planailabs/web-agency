@@ -142,7 +142,8 @@ async fn acme_account(pool: &PgPool, contact_email: &str) -> anyhow::Result<inst
 /// Issue certs for every proxy-bound FQDN on a host that has no cert row yet.
 ///
 /// Each domain/subdomain binding needs its own cert (the proxy resolves certs
-/// by exact SNI), so this checks all bindings — not just the first.
+/// by SNI, exact-first with a single-label wildcard fallback), so this checks
+/// all bindings — not just the first. A "*" binding yields a wildcard cert.
 pub async fn issue_host_certs(pool: &PgPool, host_id: Uuid) -> anyhow::Result<()> {
     let domains: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT CASE \
@@ -178,12 +179,16 @@ async fn run_acme_flow(
 ) -> anyhow::Result<(String, String)> {
     use instant_acme::{AuthorizationStatus, ChallengeType, Identifier, NewOrder, OrderStatus};
 
+    // For a wildcard ("*.example.com") the DNS-01 TXT record and any derived
+    // email live on the base domain — the "*." label never appears in DNS.
+    let base_domain = domain.strip_prefix("*.").unwrap_or(domain);
+
     let cfg = crate::config::config();
     let contact_email = cfg
         .proxy
         .as_ref()
         .and_then(|p| p.acme_email.clone())
-        .unwrap_or_else(|| format!("admin@{domain}"));
+        .unwrap_or_else(|| format!("admin@{base_domain}"));
 
     // Reuse one ACME account across all domains. Creating a fresh account per
     // issuance trips Let's Encrypt's new-registration rate limit, so hosts with
@@ -217,7 +222,7 @@ async fn run_acme_flow(
 
     // Create TXT record via Cloudflare API
     let cf_client = crate::credentials::cf_client(pool, cred_id).await?;
-    let txt_name = format!("_acme-challenge.{domain}");
+    let txt_name = format!("_acme-challenge.{base_domain}");
 
     tracing::info!(domain, txt_name = %txt_name, "creating DNS-01 TXT record");
 
