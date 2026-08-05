@@ -216,10 +216,11 @@ fn main() {
 
     #[cfg(all(feature = "server", feature = "webui"))]
     {
-        use tracing_subscriber::EnvFilter;
-        tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-            .init();
+        // Logs to stdout always; spans to OTLP when OTEL_EXPORTER_OTLP_ENDPOINT
+        // is set; metrics collected either way (the /api/metrics scrape reads
+        // the same meter provider).
+        mac_mgmt_common::otel::init("web-agency-server", "info");
+        api::counters::register();
     }
 
     #[cfg(all(feature = "server", feature = "webui"))]
@@ -256,6 +257,9 @@ fn main() {
                         .await;
                     }
                     tracing::info!("shutdown complete");
+                    // Flush buffered spans/metrics before the exit below
+                    // discards them — the last batch is the interesting one.
+                    mac_mgmt_common::otel::shutdown();
                     std::process::exit(0);
                 });
         });
@@ -392,6 +396,17 @@ fn main() {
             let mcp_service =
                 api_mcp_registry.mcp_service(crate::server_pool().expect("pool for mcp"));
 
+            // Server spans + request-duration metric. Applied per router (not
+            // over the dispatch service below) so the matched route template is
+            // already in the request extensions — the raw URI must never become
+            // a span name or metric label.
+            use mac_mgmt_common::otel::http as otel_http;
+            let observe = |router: axum::Router<()>| {
+                router
+                    .layer(otel_http::trace_layer())
+                    .layer(axum::middleware::from_fn(otel_http::record_request_metrics))
+            };
+
             // The agency app router (Dioxus + APIs, with their own auth).
             let agency_router = axum::Router::new()
                 .merge(deploy_router)
@@ -403,10 +418,11 @@ fn main() {
                 .route_service("/mcp", mcp_service.clone())
                 .route_service("/mcp/", mcp_service)
                 .merge(web_router);
+            let agency_router = observe(agency_router);
 
             // A fully separate router for proxy-forwarded static webspace
             // requests (no agency auth/Dioxus middleware).
-            let webspace_router = crate::api::static_serve::router();
+            let webspace_router = observe(crate::api::static_serve::router());
 
             // Steer by the webspace header: requests carrying it go to the
             // webspace router, everything else to the agency router. Expressed

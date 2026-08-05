@@ -7,7 +7,7 @@ edition = "2024"
 default = ["web", "server", "webui"]
 web = ["webui", "dioxus/web"]
 webui = ["dep:dioxus", "dep:wasm-bindgen", "dep:web-sys", "dep:dioxus-i18n", "dep:unic-langid", "dep:plan-ai-design", "dep:plan-ai-chat-ui", "dep:pulldown-cmark", "dep:plan-ai-actions", "plan-ai-actions/ui"]
-server = ["webui", "dioxus/server", "plan-ai-chat-ui/server", "dep:plan-ai-chat", "dep:tokio-stream", "dep:axum-oidc-client", "dep:axum-extra", "dep:percent-encoding", "dep:sqlx", "dep:tokio", "dep:sha2", "dep:argon2", "dep:hmac", "dep:hex", "dep:rand", "dep:tracing-subscriber", "dep:anyhow", "dep:toml", "dep:base64", "dep:reqwest", "dep:rustls", "dep:aes-gcm", "dep:thiserror", "dep:cloudflare-api", "dep:spaceship-api", "dep:changedetection-api", "dep:async-trait", "dep:tempfile", "dep:rust-embed", "dep:instant-acme", "dep:rcgen", "dep:async-stream", "dep:futures-core", "dep:tar", "dep:flate2", "dep:fs4", "dep:tower", "dep:tower-http", "dep:prometheus", "dep:plan-ai-html", "dep:time", "dep:plan-ai-api-mcp", "plan-ai-auth/server", "dep:plan-ai-actions", "plan-ai-actions/engine", "plan-ai-actions/postgres"]
+server = ["webui", "dioxus/server", "plan-ai-chat-ui/server", "dep:plan-ai-chat", "dep:tokio-stream", "dep:axum-oidc-client", "dep:axum-extra", "dep:percent-encoding", "dep:sqlx", "dep:tokio", "dep:sha2", "dep:argon2", "dep:hmac", "dep:hex", "dep:rand", "dep:tracing-subscriber", "dep:anyhow", "dep:toml", "dep:base64", "dep:reqwest", "dep:rustls", "dep:aes-gcm", "dep:thiserror", "dep:cloudflare-api", "dep:spaceship-api", "dep:changedetection-api", "dep:async-trait", "dep:tempfile", "dep:rust-embed", "dep:instant-acme", "dep:rcgen", "dep:async-stream", "dep:futures-core", "dep:tar", "dep:flate2", "dep:fs4", "dep:tower", "dep:tower-http", "dep:mac-mgmt-common", "dep:opentelemetry", "dep:plan-ai-html", "dep:time", "dep:plan-ai-api-mcp", "plan-ai-auth/server", "dep:plan-ai-actions", "plan-ai-actions/engine", "plan-ai-actions/postgres"]
 
 [dependencies]
 dioxus = { version = "0.8.0-alpha.0", features = ["fullstack", "router"], optional = true }
@@ -65,7 +65,10 @@ flate2 = { version = "1", optional = true }
 fs4 = { version = "0.13", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tower-http = { version = "0.6", features = ["fs", "timeout"], optional = true }
-prometheus = { version = "0.13", optional = true }
+# Observability: OTel traces + metrics, with the Prometheus scrape endpoint
+# rendered from the same meter provider. Server-only (never built for wasm).
+mac-mgmt-common = { path = "../common", features = ["otel-axum", "otel-prometheus"], optional = true }
+opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 pgtemp = "0.7"
