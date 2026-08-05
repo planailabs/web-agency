@@ -9,6 +9,7 @@ let
   cfg = config.services.web-agency-server;
   settingsFormat = pkgs.formats.toml { };
   configFile = settingsFormat.generate "config.toml" cfg.settings;
+  envFiles = lib.filter (f: f != null) [ cfg.environmentFile cfg.otlpHeadersFile ];
 in
 {
   imports = [
@@ -59,8 +60,36 @@ in
       description = ''
         OTLP/HTTP collector base URL for traces. Unset means no trace export;
         metrics are collected either way and scraped from /api/metrics.
-        Other OTEL_* variables (sampling, headers, resource attributes) can be
-        passed through {option}`environmentFile`.
+        Other OTEL_* variables (sampling, resource attributes) can be passed
+        through {option}`environmentFile`.
+      '';
+    };
+
+    otlpHeaders = lib.mkOption {
+      type = lib.types.attrsOf lib.types.str;
+      default = { };
+      example = {
+        "X-Scope-OrgID" = "web-agency";
+      };
+      description = ''
+        Headers sent with every OTLP export, as OTEL_EXPORTER_OTLP_HEADERS.
+
+        ::: {.warning}
+        These values land in the world-readable Nix store. Put API keys and
+        other credentials in {option}`otlpHeadersFile` instead.
+        :::
+      '';
+    };
+
+    otlpHeadersFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = "/run/secrets/otlp-headers.env";
+      description = ''
+        File holding the OTLP export headers, kept out of the Nix store.
+        A single line of `OTEL_EXPORTER_OTLP_HEADERS=key=value,key2=value2`
+        (comma-separated, as the OpenTelemetry spec defines it) — typically
+        the collector's auth header. Overrides {option}`otlpHeaders`.
       '';
     };
 
@@ -82,6 +111,10 @@ in
         CONFIG_PATH = configFile;
       } // lib.optionalAttrs (cfg.otlpEndpoint != null) {
         OTEL_EXPORTER_OTLP_ENDPOINT = cfg.otlpEndpoint;
+      } // lib.optionalAttrs (cfg.otlpHeaders != { }) {
+        OTEL_EXPORTER_OTLP_HEADERS = lib.concatStringsSep "," (
+          lib.mapAttrsToList (name: value: "${name}=${value}") cfg.otlpHeaders
+        );
       };
 
       serviceConfig = {
@@ -120,8 +153,10 @@ in
         RestrictNamespaces = true;
         RestrictRealtime = true;
         SystemCallArchitectures = "native";
-      } // lib.optionalAttrs (cfg.environmentFile != null) {
-        EnvironmentFile = cfg.environmentFile;
+      } // lib.optionalAttrs (envFiles != [ ]) {
+        # Read after Environment=, so a secret here wins over the store-visible
+        # otlpHeaders.
+        EnvironmentFile = envFiles;
       };
     };
 
