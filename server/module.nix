@@ -52,6 +52,18 @@ in
       '';
     };
 
+    otlpEndpoint = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "http://localhost:4318";
+      description = ''
+        OTLP/HTTP collector base URL for traces. Unset means no trace export;
+        metrics are collected either way and scraped from /api/metrics.
+        Other OTEL_* variables (sampling, headers, resource attributes) can be
+        passed through {option}`environmentFile`.
+      '';
+    };
+
     openFirewall = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -66,7 +78,11 @@ in
       wants = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      environment.CONFIG_PATH = configFile;
+      environment = {
+        CONFIG_PATH = configFile;
+      } // lib.optionalAttrs (cfg.otlpEndpoint != null) {
+        OTEL_EXPORTER_OTLP_ENDPOINT = cfg.otlpEndpoint;
+      };
 
       serviceConfig = {
         ExecStart = lib.getExe cfg.package;
