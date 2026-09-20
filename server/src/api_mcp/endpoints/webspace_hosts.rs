@@ -354,6 +354,11 @@ async fn create_host_cname(
     hostname: &str,
     cname_target: &str,
     comment: &str,
+    // Whether Cloudflare should sit in front of the name: true for Pages,
+    // where Cloudflare *is* the origin; false for a proxy host, because the
+    // agency edge answers on that name and gets its own certificate for it
+    // over ACME, which it cannot do while Cloudflare terminates TLS in front.
+    proxied: bool,
 ) -> Result<(), ApiError> {
     let domain_cf = sqlx::query_as::<_, (Option<String>, Option<Uuid>)>(
         "SELECT cloudflare_zone_id, cloudflare_credential_id FROM domains WHERE id = $1",
@@ -372,9 +377,9 @@ async fn create_host_cname(
         .await
         .map_err(|e| ApiError::internal(format!("{e}")))?;
 
-    // Wildcard records must stay DNS-only: Cloudflare supports wildcards,
-    // just not proxying them for this flow.
-    let proxied = !hostname.starts_with("*.");
+    // Wildcard records must stay DNS-only whatever the caller asked:
+    // Cloudflare supports wildcards, just not proxying them for this flow.
+    let proxied = proxied && !hostname.starts_with("*.");
     let record = cloudflare_api::compat::CreateDnsRecord {
         record_type: "CNAME".into(),
         name: hostname.to_string(),
@@ -842,6 +847,7 @@ pub async fn host_bind_domain(
             &input.hostname,
             &cname_target,
             &format!("Pages: {project_name}"),
+            true,
         )
         .await?;
     } else if let Some(ad) = agency_domain() {
@@ -852,6 +858,7 @@ pub async fn host_bind_domain(
             &input.hostname,
             &ad,
             "Proxy host",
+            false,
         )
         .await?;
         // Provision certs for all of the host's bound domains in the background
@@ -944,6 +951,7 @@ pub async fn host_fix_cname(
             &input.hostname,
             &cname_target,
             &format!("Pages: {project_name}"),
+            true,
         )
         .await
     } else {
@@ -955,6 +963,7 @@ pub async fn host_fix_cname(
             &input.hostname,
             &ad,
             "Proxy host",
+            false,
         )
         .await
     }
