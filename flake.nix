@@ -9,9 +9,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    gitlab-incus-image.url = "git+https://git.mkg20001.io/mkg20001/gitlab-incus-image.git";
+    gitlab-incus-image.inputs.nixpkgs.follows = "nixpkgs";
+    xzar.url = "github:mkg20001/xzar";
+    xzar.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, ... }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, gitlab-incus-image, xzar, ... }:
     {
       overlays.default = import ./overlay.nix { gitSha = self.rev or self.dirtyRev or "unknown"; };
       nixosModules.default = import ./server/module.nix;
@@ -24,6 +28,7 @@
         overlays = [
           (import rust-overlay)
           (import ./overlay.nix { inherit gitSha; })
+          xzar.overlays.default
         ];
         pkgs = import nixpkgs { inherit system overlays; };
         toolchain = pkgs.rust-bin.stable.latest.default.override {
@@ -75,6 +80,43 @@
           web-agency-proxy = pkgs.web-agency-proxy;
           web-agency-mocks = pkgs.web-agency-mocks;
           dioxus-cli-patched = pkgs.dioxus-cli-patched;
+        } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          # NixOS-in-Incus image for the plan.ai `nix-image` GitLab runners. The
+          # custom executor builds `flake#image` to obtain the job rootfs; without
+          # this output every job fails in prepare_executor with "flake does not
+          # provide attribute ... 'image'". Mirrors the mac-mgmt / node-mgmt /
+          # memvault CI image: nix with the xzar binary cache preconfigured, plus
+          # the tooling the pipeline scripts rely on.
+          image = (nixpkgs.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules = [
+              "${nixpkgs}/nixos/modules/virtualisation/lxc-container.nix"
+              gitlab-incus-image.nixosModules.gitlab-incus-image
+              ({ pkgs, ... }: {
+                environment.systemPackages = with pkgs; [
+                  openssh
+                  rsync
+                  pkgs.xzar-client
+                  pixz
+                ];
+
+                nixpkgs.overlays = [
+                  xzar.overlays.default
+                ];
+
+                programs.git.config.advice.detachedHead = false;
+
+                nix.settings = {
+                  substituters = [
+                    "https://xzar.plan.ai"
+                  ];
+                  trusted-public-keys = [
+                    "xzar.plan.ai:KUE66pjr6UX5HHCn9kedN1DJ2J5nSlBrKmE7tUjXewE="
+                  ];
+                };
+              })
+            ];
+          }).config.system.build.gitlab-incus-image;
         };
 
         # nixpkgs.lib (not pkgs.lib): evaluating pkgs for unsupported systems
