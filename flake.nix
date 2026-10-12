@@ -93,11 +93,32 @@
               "${nixpkgs}/nixos/modules/virtualisation/lxc-container.nix"
               gitlab-incus-image.nixosModules.gitlab-incus-image
               ({ pkgs, ... }: {
+                # `cargo test` in the `test` job runs web-agency-server's
+                # `credentials::pg_tests`, which boot an ephemeral PostgreSQL
+                # cluster through the `pgtemp` crate. pgtemp refuses to run
+                # Postgres as root: when euid == 0 it `chown -R`s the data dir
+                # to, and then execs `initdb`/`postgres` as, the `postgres`
+                # user (via `sudo`). The `nix-image` job runs as root in this
+                # rootfs, so it must provide both. Pulling `postgresql` into
+                # the devShell (see devShells.default) ships the binaries but
+                # no OS user, unlike a distro package which creates one.
+                # Without this, every pg_test aborts with
+                # `chown: invalid user: 'postgres'`.
+                users.groups.postgres = { };
+                users.users.postgres = {
+                  isSystemUser = true;
+                  group = "postgres";
+                  home = "/var/lib/postgresql";
+                  createHome = true;
+                };
+
                 environment.systemPackages = with pkgs; [
                   openssh
                   rsync
                   pkgs.xzar-client
                   pixz
+                  # pgtemp shells out to `sudo -u postgres` when running as root.
+                  sudo
                 ];
 
                 nixpkgs.overlays = [
