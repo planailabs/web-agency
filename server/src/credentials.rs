@@ -309,11 +309,37 @@ mod pg_tests {
         });
     }
 
+    /// Base directory for the throwaway Postgres clusters `pgtemp` spins up.
+    ///
+    /// `pgtemp` creates its cluster inside `$TMPDIR`. When the test binary runs
+    /// as root — which the CI `nix-image` job does — `pgtemp` `chown -R`s
+    /// *only that cluster directory* to the `postgres` user and then execs
+    /// `initdb`/`postgres` as `postgres`, so every parent of the cluster has to
+    /// be traversable by that user as well. `nix develop` points `$TMPDIR` at a
+    /// mode-0700 `nix-shell.XXXXXX` directory, which `postgres` cannot enter, and
+    /// `initdb` then aborts with
+    /// `could not open file ".../user_password.txt" for reading: Permission denied`.
+    /// Anchor the clusters under the shared system temp root instead, which is
+    /// world-traversable everywhere.
+    fn pgtemp_data_dir_prefix() -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            std::path::PathBuf::from("/tmp")
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::temp_dir()
+        }
+    }
+
     /// Boot a throwaway Postgres cluster and run the server migrations.
     /// The returned `PgTempDB` must stay alive for the duration of the test.
     async fn test_db() -> (pgtemp::PgTempDB, PgPool) {
         init_env();
-        let db = pgtemp::PgTempDB::async_new().await;
+        let db = pgtemp::PgTempDB::builder()
+            .with_data_dir_prefix(pgtemp_data_dir_prefix())
+            .start_async()
+            .await;
         let pool = PgPool::connect(&db.connection_uri()).await.unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         (db, pool)
