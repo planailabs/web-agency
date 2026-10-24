@@ -163,7 +163,7 @@ async fn cert_renewal_tick(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         }
     }
 
-    // Issue certs for proxy hosts with domain bindings but no cert row.
+    // Issue certs for proxy hosts with domain bindings but no cert row (or a failure >1h old).
     // (Cloudflare hosts terminate TLS at Cloudflare, so they need no local cert.)
     let missing: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT CASE \
@@ -175,7 +175,8 @@ async fn cert_renewal_tick(pool: &sqlx::PgPool) -> anyhow::Result<()> {
          JOIN domains d ON d.id = whd.domain_id \
          LEFT JOIN subdomains s ON s.id = whd.subdomain_id \
          WHERE NOT EXISTS (SELECT 1 FROM certificates c WHERE c.domain = \
-               CASE WHEN s.name IS NOT NULL AND s.name != '@' THEN s.name || '.' || d.name ELSE d.name END)",
+               CASE WHEN s.name IS NOT NULL AND s.name != '@' THEN s.name || '.' || d.name ELSE d.name END \
+               AND NOT (c.acme_status = 'failed' AND c.updated_at < now() - interval '1 hour'))",
     )
     .fetch_all(pool)
     .await?;

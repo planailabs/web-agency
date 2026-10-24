@@ -73,6 +73,8 @@ pub async fn issue_cert(pool: &PgPool, domain: &str) -> anyhow::Result<()> {
             .bind(not_after)
             .execute(pool)
             .await?;
+            // Every caller (proxy request, MCP, renewal) needs the proxy to pick it up.
+            crate::api::internal::notify_proxy_reload();
         }
         Err(e) => {
             sqlx::query(
@@ -139,7 +141,8 @@ async fn acme_account(pool: &PgPool, contact_email: &str) -> anyhow::Result<inst
     Ok(account)
 }
 
-/// Issue certs for every proxy-bound FQDN on a host that has no cert row yet.
+/// Issue certs for every proxy-bound FQDN on a host that has no cert row yet,
+/// or whose last attempt failed over an hour ago (backoff for LE rate limits).
 ///
 /// Each domain/subdomain binding needs its own cert (the proxy resolves certs
 /// by SNI, exact-first with a single-label wildcard fallback), so this checks
@@ -156,7 +159,8 @@ pub async fn issue_host_certs(pool: &PgPool, host_id: Uuid) -> anyhow::Result<()
          LEFT JOIN subdomains s ON s.id = whd.subdomain_id \
          WHERE whd.webspace_host_id = $1 \
            AND NOT EXISTS (SELECT 1 FROM certificates c WHERE c.domain = \
-               CASE WHEN s.name IS NOT NULL AND s.name != '@' THEN s.name || '.' || d.name ELSE d.name END)",
+               CASE WHEN s.name IS NOT NULL AND s.name != '@' THEN s.name || '.' || d.name ELSE d.name END \
+               AND NOT (c.acme_status = 'failed' AND c.updated_at < now() - interval '1 hour'))",
     )
     .bind(host_id)
     .fetch_all(pool)
@@ -169,6 +173,20 @@ pub async fn issue_host_certs(pool: &PgPool, host_id: Uuid) -> anyhow::Result<()
         }
     }
     Ok(())
+}
+
+/// One lock per DNS-01 TXT name.
+fn challenge_lock(txt_name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    // ponytail: entries are never evicted; one per issued base domain is fine.
+    static LOCKS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    LOCKS
+        .lock()
+        .unwrap()
+        .entry(txt_name.to_string())
+        .or_default()
+        .clone()
 }
 
 async fn run_acme_flow(
@@ -223,6 +241,10 @@ async fn run_acme_flow(
     // Create TXT record via Cloudflare API
     let cf_client = crate::credentials::cf_client(pool, cred_id).await?;
     let txt_name = format!("_acme-challenge.{base_domain}");
+
+    // "x" and "*.x" share this TXT name, and we wipe existing records below:
+    // concurrent flows for both would delete each other's challenge.
+    let _challenge_guard = challenge_lock(&txt_name).lock_owned().await;
 
     tracing::info!(domain, txt_name = %txt_name, "creating DNS-01 TXT record");
 

@@ -638,7 +638,6 @@ async fn issue_cert(
     // provision certs for all of the host's bound domains (each FQDN needs its
     // own cert), not just the requested one.
     let pool = state.pool.clone();
-    let reload_tx = state.reload_tx.clone();
     let domain_clone = domain.clone();
     tokio::spawn(async move {
         let host_id: Option<uuid::Uuid> = sqlx::query_scalar(
@@ -664,7 +663,6 @@ async fn issue_cert(
         match result {
             Ok(()) => {
                 tracing::info!(domain = %domain_clone, "cert issuance complete");
-                let _ = reload_tx.send(());
             }
             Err(e) => {
                 tracing::error!(domain = %domain_clone, "cert issuance failed: {e}");

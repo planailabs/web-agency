@@ -869,7 +869,6 @@ pub async fn host_bind_domain(
             if let Err(e) = crate::api::acme::issue_host_certs(&pool, host_id).await {
                 tracing::error!("host cert issuance failed: {e}");
             }
-            crate::api::internal::notify_proxy_reload();
         });
     }
 
