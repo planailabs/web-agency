@@ -218,8 +218,20 @@ async fn get_or_mint_proxy_token(
     Ok((token, expires_at))
 }
 
-/// Build an AuthInfo from webspace fields. Returns None for auth_mode = "none".
+/// A preview deployment of an unreleased build: a hostname with a
+/// `dev-admin-<id>` label and a `cloud-test` label, and its wildcard bind.
+///
+/// Previews are the path by which unreleased builds reach the internet, so they
+/// are gated even when nobody configured auth (see `build_auth_info`).
+fn is_preview_host(host: &str) -> bool {
+    let labels: Vec<&str> = host.trim_start_matches("*.").split('.').collect();
+    labels.iter().any(|l| l.starts_with("dev-admin-")) && labels.contains(&"cloud-test")
+}
+
+/// Build an AuthInfo from webspace fields. Returns None for auth_mode = "none",
+/// except on preview hosts, which default to org members only.
 fn build_auth_info(
+    host: &str,
     auth_mode: &str,
     org_id: uuid::Uuid,
     basic_list_id: Option<uuid::Uuid>,
@@ -238,6 +250,13 @@ fn build_auth_info(
                 basic_list_id: Some(list_id),
             })
         }
+        // Nothing explicit, but a preview host: org members (or admins, in the
+        // gate) only. An explicit "oidc"/"basic" above still wins.
+        _ if is_preview_host(host) => Some(AuthInfo {
+            mode: "oidc".into(),
+            org_id: Some(org_id),
+            basic_list_id: None,
+        }),
         _ => None,
     }
 }
@@ -299,7 +318,7 @@ async fn get_routes(
             Some(sub) if sub != "@" => format!("{sub}.{domain}"),
             _ => domain,
         };
-        let auth = build_auth_info(&auth_mode, org_id, basic_list_id);
+        let auth = build_auth_info(&host, &auth_mode, org_id, basic_list_id);
         if runtime.as_deref() == Some("static") {
             // Served by the agency origin (the server), not the proxy's disk.
             routes.push(RouteEntry {
@@ -392,7 +411,7 @@ async fn get_routes(
             }
         };
 
-        let auth = build_auth_info(&auth_mode, org_id, basic_list_id);
+        let auth = build_auth_info(&host, &auth_mode, org_id, basic_list_id);
         routes.push(RouteEntry {
             host,
             path_prefix,
@@ -464,7 +483,7 @@ async fn get_routes(
             )
         })?;
 
-        let auth = build_auth_info(&auth_mode, org_id, basic_list_id);
+        let auth = build_auth_info(&host, &auth_mode, org_id, basic_list_id);
 
         // Best-effort credential resolution: a broken credential logs a
         // warning and the route still loads (the upstream will just 401 /
@@ -737,29 +756,44 @@ pub async fn proxy_gate(
         return err(StatusCode::BAD_REQUEST, "error-title", "error-body");
     };
 
-    // Find which org owns the host bound to this hostname that has an OIDC-protected folder.
-    let org_id = match sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT h.organization_id FROM webspace_host_domains whd \
+    // Find which org owns the host bound to this hostname that has an
+    // OIDC-protected folder — or a preview host, which is gated by default.
+    // The wildcard bind ("*.cms.dev-admin-…") covers any single first label.
+    let wildcard = match hostname.split_once('.') {
+        Some((_, rest)) => format!("*.{rest}"),
+        None => hostname.to_string(),
+    };
+    let org_id = match sqlx::query_as::<_, (uuid::Uuid, String)>(
+        "SELECT h.organization_id, w.auth_mode FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id \
          JOIN webspaces w ON w.webspace_host_id = h.id \
          JOIN domains d ON d.id = whd.domain_id \
          LEFT JOIN subdomains s ON s.id = whd.subdomain_id \
          WHERE (CASE WHEN s.name IS NOT NULL AND s.name != '@' \
-                THEN s.name || '.' || d.name ELSE d.name END) = $1 \
-         AND w.auth_mode = 'oidc' \
-         LIMIT 1",
+                THEN s.name || '.' || d.name ELSE d.name END) = ANY($1) \
+         AND w.auth_mode IN ('oidc', 'none')",
     )
-    .bind(hostname)
-    .fetch_optional(&pool)
+    .bind(&[hostname.to_string(), wildcard][..])
+    .fetch_all(&pool)
     .await
     {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return err(
-                StatusCode::NOT_FOUND,
-                "unknown-host-title",
-                "unknown-host-body",
-            );
+        Ok(rows) => {
+            // An explicitly OIDC-gated folder wins; otherwise a preview host's
+            // default gate is the org that owns it.
+            let hit = rows
+                .iter()
+                .find(|(_, mode)| mode == "oidc")
+                .or_else(|| rows.first().filter(|_| is_preview_host(hostname)));
+            match hit {
+                Some((org_id, _)) => *org_id,
+                None => {
+                    return err(
+                        StatusCode::NOT_FOUND,
+                        "unknown-host-title",
+                        "unknown-host-body",
+                    );
+                }
+            }
         }
         Err(_) => {
             return err(
@@ -842,4 +876,52 @@ async fn sse_events(
     };
 
     Ok(Sse::new(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_auth_info, is_preview_host};
+
+    #[test]
+    fn preview_hosts_are_recognised() {
+        for host in [
+            "mv.dev-admin-f05ad5.cloud-test.plan.ai",
+            "*.cms.dev-admin-f05ad5.cloud-test.plan.ai",
+            "cms.dev-admin-f05ad5.cloud-test.plan.ai",
+        ] {
+            assert!(is_preview_host(host), "{host} is a preview host");
+        }
+        for host in [
+            "cms.plan.ai",
+            "agency.plan.ai",
+            "dev-admin-f05ad5.plan.ai", // no cloud-test label
+            "mv.cloud-test.plan.ai",
+            "cms.dev-admin-f05ad5.example.com", // not a preview namespace
+        ] {
+            assert!(!is_preview_host(host), "{host} is not a preview host");
+        }
+    }
+
+    #[test]
+    fn preview_hosts_default_to_org_oidc() {
+        let org = uuid::Uuid::nil();
+        // No explicit mode: the preview default applies.
+        let auth = build_auth_info("mv.dev-admin-1.cloud-test.plan.ai", "none", org, None)
+            .expect("preview hosts are gated");
+        assert_eq!(auth.mode, "oidc");
+        assert_eq!(auth.org_id, Some(org));
+        // A normal webspace with no mode stays open.
+        assert!(build_auth_info("cms.plan.ai", "none", org, None).is_none());
+        // An explicit mode still wins on a preview host.
+        let list = uuid::Uuid::nil();
+        let basic = build_auth_info(
+            "mv.dev-admin-1.cloud-test.plan.ai",
+            "basic",
+            org,
+            Some(list),
+        )
+        .unwrap();
+        assert_eq!(basic.mode, "basic");
+        assert_eq!(basic.basic_list_id, Some(list));
+    }
 }

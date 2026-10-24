@@ -11,7 +11,7 @@ Non-Pages webspaces (Local, Relay Tunnel, Tunnel) can require authentication bef
 
 | Mode | Description |
 |------|-------------|
-| **None** | No authentication (default) |
+| **None** | No authentication (default — except on [preview hosts](#preview-deployments)) |
 | **OIDC** | Users must log in via the agency's OIDC provider. Only members of the webspace's organization (any role) or admins can access. |
 | **HTTP Basic** | A styled sign-in page validating against a reusable credential list, with a cookie session shared across sites that use the same list. |
 
@@ -26,6 +26,14 @@ On the webspace detail page, the **Auth** section lets you change the auth mode:
 3. Click **Save**
 
 Changes take effect on the next proxy route reload (typically within seconds via SSE).
+
+## Preview Deployments
+
+A host in the preview namespace — any hostname with a `dev-admin-<id>` label and a
+`cloud-test` label, such as `mv.dev-admin-f05ad5.cloud-test.plan.ai` — requires
+OIDC sign-in of its organization's members even when its webspace has no auth mode
+configured. Previews carry unreleased builds, so they are never anonymous by
+default; an explicit auth mode on the webspace still overrides this.
 
 ## OIDC Flow
 
