@@ -349,8 +349,20 @@ impl WebAgencyProxy {
         location: &str,
         set_cookie: Option<&str>,
     ) -> Result<()> {
-        let mut resp = pingora::http::ResponseHeader::build(302, None).map_err(|e| {
-            pingora::Error::because(pingora::ErrorType::InternalError, "build 302 response", e)
+        self.send_redirect_status(session, 302, location, set_cookie)
+            .await
+    }
+
+    /// Redirect with an explicit status, optionally setting a cookie.
+    async fn send_redirect_status(
+        &self,
+        session: &mut Session,
+        code: u16,
+        location: &str,
+        set_cookie: Option<&str>,
+    ) -> Result<()> {
+        let mut resp = pingora::http::ResponseHeader::build(code, None).map_err(|e| {
+            pingora::Error::because(pingora::ErrorType::InternalError, "build redirect", e)
         })?;
         let _ = resp.insert_header("Location", location);
         if let Some(c) = set_cookie {
@@ -652,6 +664,17 @@ impl ProxyHttp for WebAgencyProxy {
                 return Ok(true);
             }
             HostState::Known => {}
+        }
+
+        // Plain HTTP is only there to get the visitor onto TLS: a static update
+        // feed served in the clear is an attacker-editable manifest. Unknown
+        // hosts fall through above, since we hold no certificate to send them
+        // to; the reachability marker is answered before this point.
+        if !is_tls(session) {
+            let location = https_redirect_location(&host, &session.req_header().uri);
+            self.send_redirect_status(session, 301, &location, None)
+                .await?;
+            return Ok(true);
         }
 
         // Clone the matched folder's mount + auth so we don't hold the routes
@@ -977,6 +1000,11 @@ fn apply_security_headers(tls: bool, resp: &mut pingora::http::ResponseHeader) {
     let _ = resp.remove_header("server");
 }
 
+/// Where a plain-HTTP request is sent: the same path and query on HTTPS.
+fn https_redirect_location(host: &str, uri: &http::Uri) -> String {
+    format!("https://{host}{}", safe_path_and_query(uri))
+}
+
 /// Extract path+query from a URI, handling both origin-form (`/path?q=1`)
 /// and absolute-form (`https://host/path?q=1`) that Pingora may produce.
 fn safe_path_and_query(uri: &http::Uri) -> String {
@@ -1132,7 +1160,24 @@ pub fn build_service(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_security_headers, host_folders, rewrite_redirect_location};
+    use super::{
+        apply_security_headers, host_folders, https_redirect_location, rewrite_redirect_location,
+    };
+
+    #[test]
+    fn https_redirect_keeps_path_and_query() {
+        let loc = |uri: &str| https_redirect_location("feeds.example.com", &uri.parse().unwrap());
+        assert_eq!(
+            loc("/manifest.json?channel=test"),
+            "https://feeds.example.com/manifest.json?channel=test"
+        );
+        assert_eq!(loc("/"), "https://feeds.example.com/");
+        // Absolute-form requests (Pingora may hand us these) keep the path too.
+        assert_eq!(
+            loc("http://feeds.example.com/files/a.bin"),
+            "https://feeds.example.com/files/a.bin"
+        );
+    }
 
     #[test]
     fn security_headers_are_added_on_tls() {
