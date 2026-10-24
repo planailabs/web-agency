@@ -332,6 +332,7 @@ impl WebAgencyProxy {
                     pingora::Error::because(pingora::ErrorType::InternalError, "build 404", e)
                 })?;
                 let _ = resp.insert_header("Content-Length", "0");
+                apply_security_headers(is_tls(session), &mut resp);
                 session.write_response_header(Box::new(resp), false).await?;
                 session
                     .write_response_body(Some(bytes::Bytes::new()), true)
@@ -356,6 +357,7 @@ impl WebAgencyProxy {
             let _ = resp.insert_header("Set-Cookie", c);
         }
         let _ = resp.insert_header("Content-Length", "0");
+        apply_security_headers(is_tls(session), &mut resp);
         session.write_response_header(Box::new(resp), false).await?;
         session
             .write_response_body(Some(bytes::Bytes::new()), true)
@@ -440,6 +442,7 @@ impl WebAgencyProxy {
         })?;
         let _ = resp.insert_header("Content-Type", "application/json");
         let _ = resp.insert_header("Content-Length", &bytes.len().to_string());
+        apply_security_headers(is_tls(session), &mut resp);
         session.write_response_header(Box::new(resp), false).await?;
         session.write_response_body(Some(bytes), true).await?;
         Ok(true)
@@ -516,19 +519,7 @@ impl WebAgencyProxy {
                             .build()
                             .to_string();
                         let location = format!("https://{host}{clean_url}");
-                        let mut resp =
-                            pingora::http::ResponseHeader::build(302, None).map_err(|e| {
-                                pingora::Error::because(
-                                    pingora::ErrorType::InternalError,
-                                    "build 302 response",
-                                    e,
-                                )
-                            })?;
-                        let _ = resp.insert_header("Location", &location);
-                        let _ = resp.insert_header("Set-Cookie", &gate_cookie);
-                        session.write_response_header(Box::new(resp), false).await?;
-                        session
-                            .write_response_body(Some(bytes::Bytes::new()), true)
+                        self.send_redirect(session, &location, Some(&gate_cookie))
                             .await?;
                         return Ok(true);
                     }
@@ -543,14 +534,7 @@ impl WebAgencyProxy {
             "https://{}/proxy-gate?return_url={encoded}",
             self.agency_domain
         );
-        let mut resp = pingora::http::ResponseHeader::build(302, None).map_err(|e| {
-            pingora::Error::because(pingora::ErrorType::InternalError, "build 302 response", e)
-        })?;
-        let _ = resp.insert_header("Location", &redirect_url);
-        session.write_response_header(Box::new(resp), false).await?;
-        session
-            .write_response_body(Some(bytes::Bytes::new()), true)
-            .await?;
+        self.send_redirect(session, &redirect_url, None).await?;
         Ok(true)
     }
 
@@ -873,10 +857,14 @@ impl ProxyHttp for WebAgencyProxy {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut pingora::http::ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Every proxied response carries the edge's headers, whatever the
+        // upstream app did or did not set.
+        apply_security_headers(is_tls(session), upstream_response);
+
         // Redirects: upstream issues an absolute path in its own path space, but
         // the request path was rewritten on the way out (mount prefix stripped,
         // relay path prefix prepended). Reverse that transform so the browser
@@ -956,6 +944,39 @@ impl ProxyHttp for WebAgencyProxy {
     }
 }
 
+/// Whether the visitor's connection is TLS. HSTS is only honoured on a secure
+/// transport (RFC 6797 §7.2), so this decides whether to send it at all.
+fn is_tls(session: &Session) -> bool {
+    session.digest().is_some_and(|d| d.ssl_digest.is_some())
+}
+
+/// Transport, framing and metadata headers every response carries, including
+/// the ones this proxy renders itself (no upstream to set them).
+///
+/// The edge is the last hop that a hosted app cannot override, so these are
+/// applied here rather than per webspace. CSP is *appended* rather than
+/// inserted: browsers intersect multiple policies, so a webspace's own CSP
+/// keeps working while framing stays blocked for everyone. `X-Frame-Options`
+/// is only set when the app left it out — duplicate XFO headers are not
+/// intersected, browsers disagree on which one wins.
+fn apply_security_headers(tls: bool, resp: &mut pingora::http::ResponseHeader) {
+    if tls {
+        let _ = resp.insert_header(
+            "Strict-Transport-Security",
+            "max-age=63072000; includeSubDomains",
+        );
+    }
+    let _ = resp.insert_header("X-Content-Type-Options", "nosniff");
+    let _ = resp.insert_header("Referrer-Policy", "strict-origin-when-cross-origin");
+    if !resp.headers.contains_key("x-frame-options") {
+        let _ = resp.insert_header("X-Frame-Options", "DENY");
+    }
+    let _ = resp.append_header("Content-Security-Policy", "frame-ancestors 'none'");
+    // An upstream's own Server banner is a build fingerprint (e.g. a container's
+    // nginx version); the edge answers, so it is not passed through.
+    let _ = resp.remove_header("server");
+}
+
 /// Extract path+query from a URI, handling both origin-form (`/path?q=1`)
 /// and absolute-form (`https://host/path?q=1`) that Pingora may produce.
 fn safe_path_and_query(uri: &http::Uri) -> String {
@@ -990,6 +1011,7 @@ async fn write_html(session: &mut Session, code: u16, html: String) -> Result<()
     })?;
     let _ = resp.insert_header("Content-Type", "text/html; charset=utf-8");
     let _ = resp.insert_header("Content-Length", &bytes.len().to_string());
+    apply_security_headers(is_tls(session), &mut resp);
     session.write_response_header(Box::new(resp), false).await?;
     session.write_response_body(Some(bytes), true).await?;
     Ok(())
@@ -1110,7 +1132,74 @@ pub fn build_service(
 
 #[cfg(test)]
 mod tests {
-    use super::{host_folders, rewrite_redirect_location};
+    use super::{apply_security_headers, host_folders, rewrite_redirect_location};
+
+    #[test]
+    fn security_headers_are_added_on_tls() {
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        apply_security_headers(true, &mut resp);
+        assert_eq!(
+            resp.headers.get("strict-transport-security").unwrap(),
+            "max-age=63072000; includeSubDomains"
+        );
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+        assert_eq!(
+            resp.headers.get("referrer-policy").unwrap(),
+            "strict-origin-when-cross-origin"
+        );
+        assert_eq!(resp.headers.get("x-frame-options").unwrap(), "DENY");
+        assert_eq!(
+            resp.headers.get("content-security-policy").unwrap(),
+            "frame-ancestors 'none'"
+        );
+    }
+
+    #[test]
+    fn security_headers_skip_hsts_off_tls() {
+        // Browsers ignore STS over plain HTTP (RFC 6797 §7.2).
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        apply_security_headers(false, &mut resp);
+        assert!(resp.headers.get("strict-transport-security").is_none());
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+    }
+
+    #[test]
+    fn upstream_server_banner_is_stripped() {
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Server", "nginx/1.28.3 (Ubuntu)")
+            .unwrap();
+        apply_security_headers(true, &mut resp);
+        assert!(resp.headers.get("server").is_none());
+    }
+
+    #[test]
+    fn app_csp_and_xfo_are_kept() {
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Content-Security-Policy", "default-src 'self'")
+            .unwrap();
+        resp.insert_header("X-Frame-Options", "SAMEORIGIN").unwrap();
+        apply_security_headers(true, &mut resp);
+        // Two CSP headers are intersected by browsers: the app's policy still
+        // applies and framing is blocked.
+        let csp: Vec<_> = resp
+            .headers
+            .get_all("content-security-policy")
+            .iter()
+            .collect();
+        assert_eq!(csp.len(), 2);
+        assert!(csp.iter().any(|v| **v == *"frame-ancestors 'none'"));
+        assert!(csp.iter().any(|v| **v == *"default-src 'self'"));
+        // A single XFO survives — no duplicate to disagree over.
+        let xfo: Vec<_> = resp.headers.get_all("x-frame-options").iter().collect();
+        assert_eq!(xfo.len(), 1);
+        assert_eq!(xfo[0], "SAMEORIGIN");
+    }
 
     #[test]
     fn redirect_location_rewrite() {
