@@ -114,6 +114,25 @@ struct RouteEntry {
     relay: Option<RelayInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auth: Option<AuthInfo>,
+    /// The folder's edge headers, when they differ from the defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<HeadersInfo>,
+}
+
+/// How the edge's security headers apply to a folder (see the proxy's
+/// `apply_security_headers`). Absent = all of them, framing denied.
+#[derive(Serialize)]
+struct HeadersInfo {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_ancestors: Option<String>,
+}
+
+fn headers_info(enabled: bool, frame_ancestors: Option<String>) -> Option<HeadersInfo> {
+    (!enabled || frame_ancestors.is_some()).then_some(HeadersInfo {
+        enabled,
+        frame_ancestors,
+    })
 }
 
 #[derive(Serialize)]
@@ -279,6 +298,7 @@ async fn get_routes(
         static_webspace_id: None,
         relay: None,
         auth: None,
+        headers: None,
     }];
 
     // Local folder routes. Static folders are served by the proxy directly from
@@ -297,9 +317,12 @@ async fn get_routes(
             uuid::Uuid,
             String,
             Option<uuid::Uuid>,
+            bool,
+            Option<String>,
         ),
     >(
-        "SELECT d.name, s.name, w.path_prefix, w.runtime, w.local_port, w.id, w.organization_id, w.auth_mode, w.auth_basic_list_id \
+        "SELECT d.name, s.name, w.path_prefix, w.runtime, w.local_port, w.id, w.organization_id, w.auth_mode, w.auth_basic_list_id, \
+         w.security_headers, w.frame_ancestors \
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id AND h.kind = 'proxy' \
          JOIN webspaces w ON w.webspace_host_id = h.id \
@@ -311,8 +334,19 @@ async fn get_routes(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    for (domain, subdomain, path_prefix, runtime, port, ws_id, org_id, auth_mode, basic_list_id) in
-        rows
+    for (
+        domain,
+        subdomain,
+        path_prefix,
+        runtime,
+        port,
+        ws_id,
+        org_id,
+        auth_mode,
+        basic_list_id,
+        security_headers,
+        frame_ancestors,
+    ) in rows
     {
         let host = match subdomain.as_deref() {
             Some(sub) if sub != "@" => format!("{sub}.{domain}"),
@@ -328,6 +362,7 @@ async fn get_routes(
                 static_webspace_id: Some(ws_id.to_string()),
                 relay: None,
                 auth,
+                headers: headers_info(security_headers, frame_ancestors),
             });
         } else if let Some(port) = port {
             routes.push(RouteEntry {
@@ -337,14 +372,30 @@ async fn get_routes(
                 static_webspace_id: None,
                 relay: None,
                 auth,
+                headers: headers_info(security_headers, frame_ancestors),
             });
         }
         // nodejs/docker folders without a running port are not routed yet.
     }
 
     // Relay folder routes: (host hostname, folder path_prefix) → relay URL with proxy token
-    let relay_rows = sqlx::query_as::<_, (String, Option<String>, String, String, uuid::Uuid, uuid::Uuid, String, Option<uuid::Uuid>)>(
-        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.relay_credential_id, w.organization_id, w.auth_mode, w.auth_basic_list_id \
+    let relay_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            uuid::Uuid,
+            uuid::Uuid,
+            String,
+            Option<uuid::Uuid>,
+            bool,
+            Option<String>,
+        ),
+    >(
+        "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.relay_credential_id, w.organization_id, w.auth_mode, w.auth_basic_list_id, \
+         w.security_headers, w.frame_ancestors \
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id AND h.kind = 'proxy' \
          JOIN webspaces w ON w.webspace_host_id = h.id \
@@ -356,8 +407,18 @@ async fn get_routes(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    for (domain, subdomain, path_prefix, relay_url, cred_id, org_id, auth_mode, basic_list_id) in
-        relay_rows
+    for (
+        domain,
+        subdomain,
+        path_prefix,
+        relay_url,
+        cred_id,
+        org_id,
+        auth_mode,
+        basic_list_id,
+        security_headers,
+        frame_ancestors,
+    ) in relay_rows
     {
         let host = match subdomain.as_deref() {
             Some(sub) if sub != "@" => format!("{sub}.{domain}"),
@@ -426,6 +487,7 @@ async fn get_routes(
                 client_key_pem: None,
             }),
             auth,
+            headers: headers_info(security_headers, frame_ancestors),
         });
     }
 
@@ -443,10 +505,13 @@ async fn get_routes(
             bool,
             Option<uuid::Uuid>,
             Option<uuid::Uuid>,
+            bool,
+            Option<String>,
         ),
     >(
         "SELECT d.name, s.name, w.path_prefix, w.relay_url, w.organization_id, w.auth_mode, w.auth_basic_list_id, \
-         w.tunnel_passthrough_host, w.tunnel_client_cert_credential_id, w.tunnel_basic_auth_credential_id \
+         w.tunnel_passthrough_host, w.tunnel_client_cert_credential_id, w.tunnel_basic_auth_credential_id, \
+         w.security_headers, w.frame_ancestors \
          FROM webspace_host_domains whd \
          JOIN webspace_hosts h ON h.id = whd.webspace_host_id AND h.kind = 'proxy' \
          JOIN webspaces w ON w.webspace_host_id = h.id \
@@ -469,6 +534,8 @@ async fn get_routes(
         passthrough_host,
         client_cert_cred_id,
         basic_auth_cred_id,
+        security_headers,
+        frame_ancestors,
     ) in tunnel_rows
     {
         let host = match subdomain.as_deref() {
@@ -529,6 +596,7 @@ async fn get_routes(
                 client_key_pem,
             }),
             auth,
+            headers: headers_info(security_headers, frame_ancestors),
         });
     }
 

@@ -57,9 +57,31 @@ pub enum AuthMode {
     },
 }
 
+/// Which of the edge's security headers a folder gets (set per folder in the
+/// agency UI). The default is all of them, framing denied.
+#[derive(Debug, Clone)]
+pub struct HeaderPolicy {
+    /// Off: none of HSTS, nosniff, Referrer-Policy or the framing block.
+    pub enabled: bool,
+    /// Who may frame the folder, as a CSP source list. None = nobody.
+    pub frame_ancestors: Option<String>,
+}
+
+impl Default for HeaderPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            frame_ancestors: None,
+        }
+    }
+}
+
 /// Per-request context — carries relay info from upstream_peer to upstream_request_filter.
 #[derive(Default)]
 pub struct RequestCtx {
+    /// The matched folder's header policy; the default for anything the proxy
+    /// answers before a folder is matched.
+    headers: HeaderPolicy,
     relay: Option<RelayCtx>,
     /// Folder mount prefix (e.g. "/api") to strip from the request path before
     /// forwarding upstream. "/" or empty means pass-through.
@@ -77,8 +99,9 @@ struct RelayCtx {
     basic_authorization: Option<String>,
 }
 
-/// One mounted folder under a host: its path prefix, route target, and auth.
-pub type Folder = (String, Route, AuthMode);
+/// One mounted folder under a host: its path prefix, route target, auth and
+/// header policy.
+pub type Folder = (String, Route, AuthMode, HeaderPolicy);
 
 /// Whether a request's host is routable, unknown, or the table is still empty.
 enum HostState {
@@ -113,7 +136,7 @@ fn path_matches(prefix: &str, path: &str) -> bool {
 fn match_folder<'a>(folders: &'a [Folder], path: &str) -> Option<&'a Folder> {
     folders
         .iter()
-        .find(|(prefix, _, _)| path_matches(prefix, path))
+        .find(|(prefix, ..)| path_matches(prefix, path))
 }
 
 /// Look up a host's folders: exact hostname first, then the single-label
@@ -332,7 +355,7 @@ impl WebAgencyProxy {
                     pingora::Error::because(pingora::ErrorType::InternalError, "build 404", e)
                 })?;
                 let _ = resp.insert_header("Content-Length", "0");
-                apply_security_headers(is_tls(session), &mut resp);
+                apply_security_headers(is_tls(session), &HeaderPolicy::default(), &mut resp);
                 session.write_response_header(Box::new(resp), false).await?;
                 session
                     .write_response_body(Some(bytes::Bytes::new()), true)
@@ -369,7 +392,7 @@ impl WebAgencyProxy {
             let _ = resp.insert_header("Set-Cookie", c);
         }
         let _ = resp.insert_header("Content-Length", "0");
-        apply_security_headers(is_tls(session), &mut resp);
+        apply_security_headers(is_tls(session), &HeaderPolicy::default(), &mut resp);
         session.write_response_header(Box::new(resp), false).await?;
         session
             .write_response_body(Some(bytes::Bytes::new()), true)
@@ -454,7 +477,7 @@ impl WebAgencyProxy {
         })?;
         let _ = resp.insert_header("Content-Type", "application/json");
         let _ = resp.insert_header("Content-Length", &bytes.len().to_string());
-        apply_security_headers(is_tls(session), &mut resp);
+        apply_security_headers(is_tls(session), &HeaderPolicy::default(), &mut resp);
         session.write_response_header(Box::new(resp), false).await?;
         session.write_response_body(Some(bytes), true).await?;
         Ok(true)
@@ -608,7 +631,7 @@ impl ProxyHttp for WebAgencyProxy {
         RequestCtx::default()
     }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         // Intercept .well-known/web-agency.json on any routed host (before auth)
         let path = session.req_header().uri.path();
         if path == "/.well-known/web-agency.json" {
@@ -682,7 +705,10 @@ impl ProxyHttp for WebAgencyProxy {
         let (mount, auth) = {
             let routes = self.routes.load();
             match host_folders(&routes, &host).and_then(|f| match_folder(f, &req_path)) {
-                Some((mount, _, auth)) => (mount.clone(), auth.clone()),
+                Some((mount, _, auth, headers)) => {
+                    ctx.headers = headers.clone();
+                    (mount.clone(), auth.clone())
+                }
                 None => return Ok(false), // unmatched path → 404 via fail_to_proxy
             }
         };
@@ -707,7 +733,7 @@ impl ProxyHttp for WebAgencyProxy {
 
         let routes = self.routes.load();
         match host_folders(&routes, &host).and_then(|f| match_folder(f, &req_path)) {
-            Some((mount, Route::Direct(upstream), _)) => {
+            Some((mount, Route::Direct(upstream), ..)) => {
                 ctx.mount_prefix = mount.clone();
                 Ok(Box::new(HttpPeer::new(
                     upstream.as_str(),
@@ -728,7 +754,7 @@ impl ProxyHttp for WebAgencyProxy {
                     basic_authorization,
                     client_cert,
                 },
-                _,
+                ..
             )) => {
                 ctx.mount_prefix = mount.clone();
                 // Store relay info in context for upstream_request_filter
@@ -763,7 +789,7 @@ impl ProxyHttp for WebAgencyProxy {
                     upstream,
                     webspace_id,
                 },
-                _,
+                ..
             )) => {
                 ctx.mount_prefix = mount.clone();
                 ctx.origin_static = Some(webspace_id.clone());
@@ -886,7 +912,7 @@ impl ProxyHttp for WebAgencyProxy {
     ) -> Result<()> {
         // Every proxied response carries the edge's headers, whatever the
         // upstream app did or did not set.
-        apply_security_headers(is_tls(session), upstream_response);
+        apply_security_headers(is_tls(session), &ctx.headers, upstream_response);
 
         // Redirects: upstream issues an absolute path in its own path space, but
         // the request path was rewritten on the way out (mount prefix stripped,
@@ -979,10 +1005,27 @@ fn is_tls(session: &Session) -> bool {
 /// The edge is the last hop that a hosted app cannot override, so these are
 /// applied here rather than per webspace. CSP is *appended* rather than
 /// inserted: browsers intersect multiple policies, so a webspace's own CSP
-/// keeps working while framing stays blocked for everyone. `X-Frame-Options`
-/// is only set when the app left it out — duplicate XFO headers are not
-/// intersected, browsers disagree on which one wins.
-fn apply_security_headers(tls: bool, resp: &mut pingora::http::ResponseHeader) {
+/// keeps working while framing stays blocked. `X-Frame-Options` is only set
+/// when the app left it out — duplicate XFO headers are not intersected,
+/// browsers disagree on which one wins.
+///
+/// A folder can turn the set off, or name who may frame it (`policy`, set in
+/// the agency UI). An app that names its own `frame-ancestors` has decided
+/// that itself and gets no framing default either: an appended `'none'` would
+/// intersect its list away, and browsers ignore XFO next to `frame-ancestors`
+/// anyway. The CMS relies on this — its branch previews are iframes in the
+/// CMS itself.
+fn apply_security_headers(
+    tls: bool,
+    policy: &HeaderPolicy,
+    resp: &mut pingora::http::ResponseHeader,
+) {
+    // An upstream's own Server banner is a build fingerprint (e.g. a container's
+    // nginx version); the edge answers, so it is not passed through.
+    let _ = resp.remove_header("server");
+    if !policy.enabled {
+        return;
+    }
     if tls {
         let _ = resp.insert_header(
             "Strict-Transport-Security",
@@ -991,13 +1034,37 @@ fn apply_security_headers(tls: bool, resp: &mut pingora::http::ResponseHeader) {
     }
     let _ = resp.insert_header("X-Content-Type-Options", "nosniff");
     let _ = resp.insert_header("Referrer-Policy", "strict-origin-when-cross-origin");
-    if !resp.headers.contains_key("x-frame-options") {
-        let _ = resp.insert_header("X-Frame-Options", "DENY");
+    let app_frames = resp
+        .headers
+        .get_all("content-security-policy")
+        .iter()
+        .any(|v| v.to_str().is_ok_and(names_frame_ancestors));
+    if app_frames {
+        return;
     }
-    let _ = resp.append_header("Content-Security-Policy", "frame-ancestors 'none'");
-    // An upstream's own Server banner is a build fingerprint (e.g. a container's
-    // nginx version); the edge answers, so it is not passed through.
-    let _ = resp.remove_header("server");
+    match &policy.frame_ancestors {
+        Some(sources) => {
+            let _ = resp.append_header(
+                "Content-Security-Policy",
+                format!("frame-ancestors {sources}"),
+            );
+        }
+        None => {
+            if !resp.headers.contains_key("x-frame-options") {
+                let _ = resp.insert_header("X-Frame-Options", "DENY");
+            }
+            let _ = resp.append_header("Content-Security-Policy", "frame-ancestors 'none'");
+        }
+    }
+}
+
+/// Whether a CSP header value carries a `frame-ancestors` directive.
+fn names_frame_ancestors(csp: &str) -> bool {
+    csp.split(';').any(|d| {
+        d.split_ascii_whitespace()
+            .next()
+            .is_some_and(|name| name.eq_ignore_ascii_case("frame-ancestors"))
+    })
 }
 
 /// Where a plain-HTTP request is sent: the same path and query on HTTPS.
@@ -1039,7 +1106,7 @@ async fn write_html(session: &mut Session, code: u16, html: String) -> Result<()
     })?;
     let _ = resp.insert_header("Content-Type", "text/html; charset=utf-8");
     let _ = resp.insert_header("Content-Length", &bytes.len().to_string());
-    apply_security_headers(is_tls(session), &mut resp);
+    apply_security_headers(is_tls(session), &HeaderPolicy::default(), &mut resp);
     session.write_response_header(Box::new(resp), false).await?;
     session.write_response_body(Some(bytes), true).await?;
     Ok(())
@@ -1129,7 +1196,7 @@ fn strip_gate_params(uri: &str) -> String {
 pub fn build_service(
     server_conf: &Arc<pingora::server::configuration::ServerConf>,
     cfg: &crate::config::ProxyConfig,
-    routes: Arc<ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>>,
+    routes: Arc<ArcSwap<HashMap<String, Vec<Folder>>>>,
     cert_store: Arc<crate::cert_store::CertStore>,
 ) -> pingora::services::listening::Service<pingora::proxy::HttpProxy<WebAgencyProxy>> {
     let internal_token = cfg.internal_token().trim().to_string();
@@ -1161,7 +1228,7 @@ pub fn build_service(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_security_headers, host_folders, https_redirect_location, rewrite_redirect_location,
+        apply_security_headers, host_folders, HeaderPolicy, https_redirect_location, rewrite_redirect_location,
     };
 
     #[test]
@@ -1182,7 +1249,7 @@ mod tests {
     #[test]
     fn security_headers_are_added_on_tls() {
         let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
-        apply_security_headers(true, &mut resp);
+        apply_security_headers(true, &HeaderPolicy::default(), &mut resp);
         assert_eq!(
             resp.headers.get("strict-transport-security").unwrap(),
             "max-age=63072000; includeSubDomains"
@@ -1206,7 +1273,7 @@ mod tests {
     fn security_headers_skip_hsts_off_tls() {
         // Browsers ignore STS over plain HTTP (RFC 6797 §7.2).
         let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
-        apply_security_headers(false, &mut resp);
+        apply_security_headers(false, &HeaderPolicy::default(), &mut resp);
         assert!(resp.headers.get("strict-transport-security").is_none());
         assert_eq!(
             resp.headers.get("x-content-type-options").unwrap(),
@@ -1215,11 +1282,64 @@ mod tests {
     }
 
     #[test]
+    fn app_frame_ancestors_replaces_the_framing_defaults() {
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        resp.insert_header(
+            "Content-Security-Policy",
+            "default-src 'self'; Frame-Ancestors https://cms.example.com",
+        )
+        .unwrap();
+        apply_security_headers(true, &HeaderPolicy::default(), &mut resp);
+        let csp: Vec<_> = resp
+            .headers
+            .get_all("content-security-policy")
+            .iter()
+            .collect();
+        assert_eq!(csp.len(), 1);
+        assert!(resp.headers.get("x-frame-options").is_none());
+        // A directive whose name merely contains the word does not count.
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Content-Security-Policy", "x-frame-ancestors *")
+            .unwrap();
+        apply_security_headers(true, &HeaderPolicy::default(), &mut resp);
+        assert_eq!(resp.headers.get("x-frame-options").unwrap(), "DENY");
+    }
+
+    #[test]
+    fn folder_policy_can_drop_the_headers_or_allow_framing() {
+        let off = HeaderPolicy {
+            enabled: false,
+            frame_ancestors: None,
+        };
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        resp.insert_header("Server", "nginx").unwrap();
+        apply_security_headers(true, &off, &mut resp);
+        assert!(resp.headers.get("strict-transport-security").is_none());
+        assert!(resp.headers.get("x-frame-options").is_none());
+        assert!(resp.headers.get("content-security-policy").is_none());
+        // The banner goes regardless.
+        assert!(resp.headers.get("server").is_none());
+
+        let framed = HeaderPolicy {
+            enabled: true,
+            frame_ancestors: Some("https://cms.example.com".into()),
+        };
+        let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
+        apply_security_headers(true, &framed, &mut resp);
+        assert!(resp.headers.get("x-frame-options").is_none());
+        assert_eq!(
+            resp.headers.get("content-security-policy").unwrap(),
+            "frame-ancestors https://cms.example.com"
+        );
+        assert!(resp.headers.get("strict-transport-security").is_some());
+    }
+
+    #[test]
     fn upstream_server_banner_is_stripped() {
         let mut resp = pingora::http::ResponseHeader::build(200, None).unwrap();
         resp.insert_header("Server", "nginx/1.28.3 (Ubuntu)")
             .unwrap();
-        apply_security_headers(true, &mut resp);
+        apply_security_headers(true, &HeaderPolicy::default(), &mut resp);
         assert!(resp.headers.get("server").is_none());
     }
 
@@ -1229,7 +1349,7 @@ mod tests {
         resp.insert_header("Content-Security-Policy", "default-src 'self'")
             .unwrap();
         resp.insert_header("X-Frame-Options", "SAMEORIGIN").unwrap();
-        apply_security_headers(true, &mut resp);
+        apply_security_headers(true, &HeaderPolicy::default(), &mut resp);
         // Two CSP headers are intersected by browsers: the app's policy still
         // applies and framing is blocked.
         let csp: Vec<_> = resp
@@ -1281,7 +1401,9 @@ mod tests {
         use std::collections::HashMap;
 
         let folder =
-            |tag: &str| -> Vec<Folder> { vec![(tag.into(), Route::Direct(tag.into()), AuthMode::None)] };
+            |tag: &str| -> Vec<Folder> {
+                vec![(tag.into(), Route::Direct(tag.into()), AuthMode::None, Default::default())]
+            };
         let mut routes: HashMap<String, Vec<Folder>> = HashMap::new();
         routes.insert("www.example.com".into(), folder("exact"));
         routes.insert("*.example.com".into(), folder("wild"));

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::cert_store::{CertEntry, CertKey, CertStore};
 use crate::config::ProxyConfig;
-use crate::proxy::{AuthMode, Route};
+use crate::proxy::{AuthMode, HeaderPolicy, Route};
 
 #[derive(Debug, Deserialize)]
 struct RoutesResponse {
@@ -25,6 +25,16 @@ struct RouteEntry {
     static_webspace_id: Option<String>,
     relay: Option<RelayInfoEntry>,
     auth: Option<AuthInfoEntry>,
+    /// Absent = the edge's full set of headers, framing denied.
+    #[serde(default)]
+    headers: Option<HeadersEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeadersEntry {
+    enabled: bool,
+    #[serde(default)]
+    frame_ancestors: Option<String>,
 }
 
 fn default_path_prefix() -> String {
@@ -103,7 +113,7 @@ fn build_sse_client(token: &str) -> reqwest::Client {
 async fn reload_routes(
     client: &reqwest::Client,
     server_url: &str,
-    routes: &ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>,
+    routes: &ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>,
 ) -> Option<Option<i64>> {
     match client
         .get(format!("{server_url}/api/internal/routes"))
@@ -114,7 +124,7 @@ async fn reload_routes(
             Ok(body) => {
                 let token_lifetime_secs = body.token_lifetime_secs;
                 let entries = body.routes;
-                let mut map: HashMap<String, Vec<(String, Route, AuthMode)>> = HashMap::new();
+                let mut map: HashMap<String, Vec<crate::proxy::Folder>> = HashMap::new();
                 for entry in entries {
                     let route = if let Some(webspace_id) = entry.static_webspace_id {
                         Route::StaticOrigin {
@@ -167,9 +177,17 @@ async fn reload_routes(
                         _ => AuthMode::None,
                     };
 
+                    let headers = entry
+                        .headers
+                        .map(|h| HeaderPolicy {
+                            enabled: h.enabled,
+                            frame_ancestors: h.frame_ancestors,
+                        })
+                        .unwrap_or_default();
+
                     map.entry(entry.host)
                         .or_default()
-                        .push((entry.path_prefix, route, auth));
+                        .push((entry.path_prefix, route, auth, headers));
                 }
                 // Longest path prefix first, so the proxy matches the most specific folder.
                 for folders in map.values_mut() {
@@ -177,7 +195,7 @@ async fn reload_routes(
                 }
                 let mut route_count = 0usize;
                 for (host, folders) in &map {
-                    for (path_prefix, route, auth) in folders {
+                    for (path_prefix, route, auth, _) in folders {
                         route_count += 1;
                         let route_desc = match route {
                             Route::Direct(upstream) => format!("direct → {upstream}"),
@@ -260,7 +278,7 @@ async fn reload_certs(client: &reqwest::Client, server_url: &str, cert_store: &C
 async fn trigger_missing_certs(
     client: &reqwest::Client,
     server_url: &str,
-    routes: &ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>,
+    routes: &ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>,
     cert_store: &CertStore,
 ) {
     let route_hosts: Vec<String> = routes.load().keys().cloned().collect();
@@ -283,7 +301,7 @@ async fn trigger_missing_certs(
 async fn reload_all(
     client: &reqwest::Client,
     server_url: &str,
-    routes: &ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>,
+    routes: &ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>,
     cert_store: &CertStore,
 ) -> Option<i64> {
     let token_lifetime = reload_routes(client, server_url, routes)
@@ -302,7 +320,7 @@ async fn reload_all(
 /// `start()` immediately so Pingora never blocks on us during shutdown.
 pub fn build_service(
     cfg: ProxyConfig,
-    routes: Arc<ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>>,
+    routes: Arc<ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>>,
     cert_store: Arc<CertStore>,
 ) -> pingora::services::background::GenBackgroundService<SyncTask> {
     pingora::services::background::background_service(
@@ -317,7 +335,7 @@ pub fn build_service(
 
 pub struct SyncTask {
     cfg: ProxyConfig,
-    routes: Arc<ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>>,
+    routes: Arc<ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>>,
     cert_store: Arc<CertStore>,
 }
 
@@ -351,7 +369,7 @@ fn schedule_refresh(interval: &mut tokio::time::Interval, lifetime_secs: Option<
 
 async fn sync_loop(
     cfg: ProxyConfig,
-    routes: Arc<ArcSwap<HashMap<String, Vec<(String, Route, AuthMode)>>>>,
+    routes: Arc<ArcSwap<HashMap<String, Vec<crate::proxy::Folder>>>>,
     cert_store: Arc<CertStore>,
 ) {
     let token = cfg.internal_token();

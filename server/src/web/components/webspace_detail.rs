@@ -259,6 +259,13 @@ pub fn WebspaceDetail(id: String) -> Element {
                 current_mode: data.auth_mode.clone(),
                 current_list_name: data.auth_basic_list_name.clone(),
             }
+
+            SectionHeading { class: "mt-6", "Security Headers" }
+            SecurityHeadersSection {
+                webspace_id: data.id,
+                current_enabled: data.security_headers,
+                current_frame_ancestors: data.frame_ancestors.clone().unwrap_or_default(),
+            }
         }
 
         // Domains, CNAME and Change Detection are managed on the parent host.
@@ -1273,6 +1280,9 @@ fn WebspaceSettingsSection(
                                         clear_tunnel_client_cert: clear_cert,
                                         tunnel_basic_auth_credential_id: basic_id,
                                         clear_tunnel_basic_auth: clear_basic,
+                                        security_headers: None,
+                                        frame_ancestors: None,
+                                        clear_frame_ancestors: None,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));
@@ -1410,6 +1420,9 @@ fn AuthSettingsSection(
                                         clear_tunnel_client_cert: None,
                                         tunnel_basic_auth_credential_id: None,
                                         clear_tunnel_basic_auth: None,
+                                        security_headers: None,
+                                        frame_ancestors: None,
+                                        clear_frame_ancestors: None,
                                     }).await {
                                         Ok(()) => {
                                             message.set(Some("Saved".into()));
@@ -1432,6 +1445,87 @@ fn AuthSettingsSection(
                 if *auth_mode.read() == "oidc" {
                     div { class: "text-sm text-fg-muted",
                         "Members of this webspace's organization will have access after logging in via the agency."
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The headers the edge adds to this folder's responses: all of them or none,
+/// and who may frame it.
+#[component]
+fn SecurityHeadersSection(
+    webspace_id: Uuid,
+    current_enabled: bool,
+    current_frame_ancestors: String,
+) -> Element {
+    let mut refresh: Signal<u32> = use_context();
+    let mut enabled = use_signal(move || current_enabled);
+    let mut frame_ancestors = use_signal(move || current_frame_ancestors.clone());
+    let mut saving = use_signal(|| false);
+    let mut message = use_signal(|| None::<String>);
+
+    rsx! {
+        Card {
+            div { class: "p-4 space-y-4",
+                FormField { label: "Edge headers",
+                    label { class: "flex items-center gap-2 text-sm h-9",
+                        input {
+                            r#type: "checkbox",
+                            checked: *enabled.read(),
+                            oninput: move |evt| enabled.set(evt.checked()),
+                        }
+                        "Add HSTS, nosniff, Referrer-Policy and the framing block"
+                    }
+                }
+                if *enabled.read() {
+                    FormField { label: "Allowed frame ancestors",
+                        input {
+                            class: "input w-full font-mono",
+                            placeholder: "nobody — e.g. https://cms.example.com 'self'",
+                            value: "{frame_ancestors}",
+                            oninput: move |evt| frame_ancestors.set(evt.value()),
+                        }
+                    }
+                    div { class: "text-sm text-fg-muted",
+                        "Empty denies framing everywhere. A list of origins lets those pages show this folder in an iframe. "
+                        "An app that sends its own CSP frame-ancestors decides for itself."
+                    }
+                } else {
+                    div { class: "text-sm text-fg-muted",
+                        "Responses go out with only what the app sets. The upstream Server banner is still removed."
+                    }
+                }
+                div { class: "flex items-center gap-3",
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        disabled: *saving.read(),
+                        onclick: move |_| {
+                            let on = *enabled.read();
+                            let list = frame_ancestors.read().trim().to_string();
+                            saving.set(true);
+                            message.set(None);
+                            spawn(async move {
+                                match update_webspace_settings(WebspaceUpdateInput {
+                                    id: webspace_id,
+                                    security_headers: Some(on),
+                                    frame_ancestors: Some(list),
+                                    ..Default::default()
+                                }).await {
+                                    Ok(()) => {
+                                        message.set(Some("Saved".into()));
+                                        refresh += 1;
+                                    }
+                                    Err(e) => message.set(Some(format!("Error: {e}"))),
+                                }
+                                saving.set(false);
+                            });
+                        },
+                        if *saving.read() { "Saving..." } else { "Save" }
+                    }
+                    if let Some(msg) = &*message.read() {
+                        span { class: "text-sm text-fg-muted", "{msg}" }
                     }
                 }
             }

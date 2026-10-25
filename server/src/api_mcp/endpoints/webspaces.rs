@@ -71,6 +71,11 @@ pub struct WebspaceData {
     pub tunnel_client_cert_credential_id: Option<Uuid>,
     /// Tunnel folders: basic_auth credential injected as Authorization header.
     pub tunnel_basic_auth_credential_id: Option<Uuid>,
+    /// Whether the edge adds its security headers (HSTS, nosniff,
+    /// Referrer-Policy, framing block) to this folder's responses.
+    pub security_headers: bool,
+    /// Who may frame this folder, as a CSP source list. None = nobody.
+    pub frame_ancestors: Option<String>,
     pub organization_id: Uuid,
     pub organization_name: String,
     /// Whether the caller can manage tokens for this webspace's org.
@@ -115,7 +120,7 @@ pub struct WebspaceCreateInput {
     pub auth_basic_list_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebspaceUpdateInput {
     pub id: Uuid,
     /// New display name (Pages project name stays unchanged for CF folders).
@@ -159,6 +164,16 @@ pub struct WebspaceUpdateInput {
     /// Set true to clear the basic-auth credential (when the id is absent).
     #[serde(default)]
     pub clear_tunnel_basic_auth: Option<bool>,
+    /// Edge security headers on (default) or off. Absent = keep current.
+    #[serde(default)]
+    pub security_headers: Option<bool>,
+    /// Who may frame this folder: a CSP source list such as
+    /// `https://cms.example.com 'self'`. Absent = keep current.
+    #[serde(default)]
+    pub frame_ancestors: Option<String>,
+    /// Set true to deny framing again (when `frame_ancestors` is absent).
+    #[serde(default)]
+    pub clear_frame_ancestors: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -415,10 +430,16 @@ pub async fn webspace_get(
 
     principal.require_read(&org_id)?;
 
-    let (tunnel_passthrough_host, tunnel_client_cert_credential_id, tunnel_basic_auth_credential_id) =
-        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+    let (
+        tunnel_passthrough_host,
+        tunnel_client_cert_credential_id,
+        tunnel_basic_auth_credential_id,
+        security_headers,
+        frame_ancestors,
+    ) = sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>, bool, Option<String>)>(
             "SELECT tunnel_passthrough_host, tunnel_client_cert_credential_id, \
-             tunnel_basic_auth_credential_id FROM webspaces WHERE id = $1",
+             tunnel_basic_auth_credential_id, security_headers, frame_ancestors \
+             FROM webspaces WHERE id = $1",
         )
         .bind(input.id)
         .fetch_one(pool)
@@ -529,6 +550,8 @@ pub async fn webspace_get(
         tunnel_passthrough_host,
         tunnel_client_cert_credential_id,
         tunnel_basic_auth_credential_id,
+        security_headers,
+        frame_ancestors,
         organization_id: org_id,
         organization_name: org_name,
         is_org_admin,
@@ -765,8 +788,68 @@ pub async fn webspace_update(
     .await
     .map_err(super::internal)?;
 
+    if input.security_headers.is_some()
+        || input.frame_ancestors.is_some()
+        || input.clear_frame_ancestors == Some(true)
+    {
+        let frame_ancestors = match &input.frame_ancestors {
+            Some(raw) => normalize_frame_ancestors(raw)?,
+            None => None,
+        };
+        // A new list replaces the old; a clear or an empty list removes it;
+        // neither keeps whatever is there.
+        let replace = input.frame_ancestors.is_some() || input.clear_frame_ancestors == Some(true);
+        sqlx::query(
+            "UPDATE webspaces SET security_headers = COALESCE($1, security_headers), \
+             frame_ancestors = CASE WHEN $2 THEN $3 ELSE frame_ancestors END \
+             WHERE id = $4",
+        )
+        .bind(input.security_headers)
+        .bind(replace)
+        .bind(&frame_ancestors)
+        .bind(input.id)
+        .execute(pool)
+        .await
+        .map_err(super::internal)?;
+    }
+
     crate::api::internal::notify_proxy_reload();
     Ok(())
+}
+
+/// Check and tidy a `frame-ancestors` source list. It goes into a response
+/// header verbatim, so only the CSP source grammar gets through: keywords
+/// (`'self'`, `'none'`) and scheme/host sources — nothing that could end the
+/// directive (`;`), start another policy (`,`) or break the header line.
+/// Blank means "nobody", the same as no list.
+#[cfg(feature = "server")]
+fn normalize_frame_ancestors(raw: &str) -> Result<Option<String>, ApiError> {
+    let sources: Vec<&str> = raw.split_ascii_whitespace().collect();
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    if sources.len() > 32 {
+        return Err(ApiError::bad_request("frame ancestors: at most 32 sources"));
+    }
+    for source in &sources {
+        let keyword = matches!(*source, "'self'" | "'none'");
+        let host_source = source.len() <= 255
+            && source
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".:/*-_[]".contains(&b));
+        if !keyword && !host_source {
+            return Err(ApiError::bad_request(format!(
+                "frame ancestors: {source:?} is not a source — use 'self', 'none', \
+                 or an origin such as https://example.com"
+            )));
+        }
+    }
+    if sources.len() > 1 && sources.contains(&"'none'") {
+        return Err(ApiError::bad_request(
+            "frame ancestors: 'none' cannot be combined with other sources",
+        ));
+    }
+    Ok(Some(sources.join(" ")))
 }
 
 /// Move a webspace folder to another organization (requires write on both
@@ -1161,4 +1244,27 @@ pub async fn webspace_import_pages(
         skipped,
         errors,
     })
+}
+
+#[cfg(all(test, feature = "server"))]
+mod frame_ancestors_tests {
+    use super::normalize_frame_ancestors;
+
+    #[test]
+    fn source_lists_are_tidied_and_checked() {
+        assert_eq!(normalize_frame_ancestors("  ").unwrap(), None);
+        assert_eq!(
+            normalize_frame_ancestors(" https://cms.example.com\n 'self' ").unwrap(),
+            Some("https://cms.example.com 'self'".into())
+        );
+        assert_eq!(
+            normalize_frame_ancestors("https://*.example.com:8443").unwrap(),
+            Some("https://*.example.com:8443".into())
+        );
+        // Anything that could close the directive or add a policy is refused.
+        assert!(normalize_frame_ancestors("https://a.com; script-src *").is_err());
+        assert!(normalize_frame_ancestors("https://a.com, frame-ancestors *").is_err());
+        assert!(normalize_frame_ancestors("'unsafe-inline'").is_err());
+        assert!(normalize_frame_ancestors("'none' https://a.com").is_err());
+    }
 }
